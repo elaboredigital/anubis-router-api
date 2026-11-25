@@ -26,6 +26,7 @@ import { buildGlobalStats } from './global-stats.js';
 import { buildModelAnalytics } from './model-analytics.js';
 import { buildReadiness, normalizeReadinessUpdate, validateReadinessUpdate, commercialBlock, CONNECTION_BLOCKED, DEFAULT_READINESS_POLICY } from './provider-readiness.js';
 import { MAXROUTER_PRICING_PAGE, MAXROUTER_PRICING_URL, parseMaxRouterPrices } from './maxrouter-pricing.js';
+import { buildPublicCatalog } from './public-catalog.js';
 import { makeReferralCode, safeText, normalizeReferral, validateRegister, validateQualify, applyQualify, validateStatus, applyStatus, buildClientReferralReport, buildAdminReferralReport, validateMoveCredit } from './referrals.js';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -419,9 +420,16 @@ async function checkConnection(c, secret) {
 async function saveRoutes(next) {
   await store.save('routes', next); routes = next;
 }
+let publicCatalogCache = null;
 const server = http.createServer(async (req, res) => {
   try {
     const url = new URL(req.url, 'http://localhost');
+    // A API não deve ser indexada por buscadores.
+    res.setHeader('x-robots-tag', 'noindex, nofollow');
+    if (req.method === 'GET' && url.pathname === '/robots.txt') {
+      res.writeHead(200, { 'content-type': 'text/plain; charset=utf-8' });
+      return res.end('User-agent: *\nDisallow: /\n');
+    }
     const origin = req.headers.origin;
     if (origin && !allowedOrigins.has(origin)) return json(res, 403, { error: 'Origem não permitida' });
     if (origin) {
@@ -1154,6 +1162,16 @@ const server = http.createServer(async (req, res) => {
         return json(res, 200, after);
       }
       return json(res, 404, { error: 'Rota não encontrada' });
+    }
+    // Catálogo público do painel do cliente: preço de venda e disponibilidade, sem custo, conexão ou credencial.
+    if (req.method === 'GET' && url.pathname === '/public/models') {
+      const now = Date.now();
+      if (!publicCatalogCache || now - publicCatalogCache.at > 60_000) {
+        const records = await usageStore.list();
+        const data = buildPublicCatalog({ routes, connectionForRoute, records, now, resolve: (provider, model) => resolvePrices(priceHistory, new Date(now).toISOString(), provider, model, null) });
+        publicCatalogCache = { at: now, data };
+      }
+      return json(res, 200, { object: 'list', updatedAt: new Date(publicCatalogCache.at).toISOString(), data: publicCatalogCache.data });
     }
     if (url.pathname.startsWith('/v1/')) {
       const clientKey = clientForRequest(req);

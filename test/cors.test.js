@@ -34,6 +34,12 @@ test('API aceita preflight das origens configuradas e devolve cabeçalhos CORS',
   const base = `http://127.0.0.1:${port}`;
   const origin = 'https://admin.anubisrouter.com';
 
+  const robots = await fetch(`${base}/robots.txt`);
+  assert.equal(robots.status, 200);
+  assert.match(await robots.text(), /Disallow: \//);
+  assert.equal(robots.headers.get('x-robots-tag'), 'noindex, nofollow');
+  assert.equal((await fetch(`${base}/v1/models`)).headers.get('x-robots-tag'), 'noindex, nofollow');
+
   const preflight = await fetch(`${base}/v1/models`, {
     method: 'OPTIONS',
     headers: { origin, 'access-control-request-method': 'GET', 'access-control-request-headers': 'authorization' },
