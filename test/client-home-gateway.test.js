@@ -10,7 +10,7 @@ import path from 'node:path';
 test('resumo do cliente fica dentro do admin e expõe somente os dados da chave selecionada', async t => {
   const dir = await mkdtemp(path.join(os.tmpdir(), 'anubis-client-home-'));
   await cp('src', path.join(dir, 'src'), { recursive: true });
-  await cp('../public', path.join(dir, 'public'), { recursive: true });
+  await cp('../admin', path.join(dir, 'public'), { recursive: true });
   await cp('package.json', path.join(dir, 'package.json'));
   const rawKey = 'anubis_cliente_abcdefghijkl';
   const otherRawKey = 'anubis_outro_abcdefghijkl';

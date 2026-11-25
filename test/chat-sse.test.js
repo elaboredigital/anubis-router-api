@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createSseDecoder, parseSseData, describeGatewayError, redactKey, parseModels } from '../../public/chat-sse.js';
+import { createSseDecoder, parseSseData, describeGatewayError, redactKey, parseModels } from '../../admin/chat-sse.js';
 
 test('parser SSE do chat aceita eventos divididos, comentarios e multiple linhas data', () => {
   const decoder = createSseDecoder();

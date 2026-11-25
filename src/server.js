@@ -55,9 +55,13 @@ const extensionTargets = [
 const defaultRoutes = [{ id: 'anubis/devstral', provider: 'xkiro', upstreamModel: 'mistralai/devstral-medium', enabled: true }];
 const port = Number(process.env.PORT || 3210);
 const host = process.env.HOST || '127.0.0.1';
-// Origens aceitas pelo painel: localhost e o endereço público (ANUBIS_PUBLIC_URL, separado por vírgula)
-const allowedOrigins = new Set([`http://localhost:${port}`, `http://127.0.0.1:${port}`,
-  ...(process.env.ANUBIS_PUBLIC_URL || '').split(',').map(u => u.trim().replace(/\/+$/, '')).filter(Boolean)]);
+// Origens aceitas pelo painel e pelo site: dev local e endereços públicos (ANUBIS_PUBLIC_URL, separado por vírgula).
+const allowedOrigins = new Set([
+  `http://localhost:${port}`, `http://127.0.0.1:${port}`,
+  'http://localhost:3000', 'http://127.0.0.1:3000',
+  'http://localhost:3001', 'http://127.0.0.1:3001',
+  ...(process.env.ANUBIS_PUBLIC_URL || '').split(',').map(u => u.trim().replace(/\/+$/, '')).filter(Boolean),
+]);
 const adminKey = process.env.ANUBIS_ADMIN_KEY;
 const encryptionKey = process.env.ANUBIS_ENCRYPTION_KEY;
 if (!adminKey || adminKey.length < 16 || adminKey.includes('crie_') || !/^[a-f0-9]{64}$/i.test(encryptionKey || '')) {
@@ -420,6 +424,22 @@ const server = http.createServer(async (req, res) => {
     const url = new URL(req.url, 'http://localhost');
     const origin = req.headers.origin;
     if (origin && !allowedOrigins.has(origin)) return json(res, 403, { error: 'Origem não permitida' });
+    if (origin) {
+      res.setHeader('access-control-allow-origin', origin);
+      res.setHeader('access-control-allow-headers', 'authorization, content-type, x-api-key');
+      res.setHeader('access-control-allow-methods', 'GET, POST, PATCH, DELETE, OPTIONS');
+      res.setHeader('vary', 'Origin');
+    }
+    if (req.method === 'OPTIONS') {
+      res.writeHead(204, { 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' });
+      return res.end();
+    }
+    // Transição: o painel e o site têm servidores próprios; aqui o config.js mantém as cópias de teste funcionando.
+    if (req.method === 'GET' && url.pathname === '/config.js') {
+      const apiUrl = (process.env.ANUBIS_API_URL || '').replace(/\/+$/, '');
+      res.writeHead(200, { 'content-type': 'text/javascript; charset=utf-8', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' });
+      return res.end(`window.ANUBIS_API_URL = ${JSON.stringify(apiUrl)};\n`);
+    }
     const pages = ['/', '/models', '/providers', '/routes', '/plans', '/ledger', '/topup', '/keys', '/users', '/stats', '/global-stats', '/client-home', '/system', '/connect', '/chat', '/minha-conta', '/referrals', '/indicacoes'];
     // Chat, área do cliente e indicações são seções do mesmo painel; todas as URLs servem o index.html.
     const assets = ['/app.js', '/style.css', '/panel-extras.css', '/brand.png', '/connect-tools.json', '/chat-web.js', '/chat-sse.js', '/account.js', '/referrals-client.js'];

@@ -47,7 +47,7 @@ test('revenda confirmada exige evidência e homologação exige revisão datada'
 test('admin persiste homologação e aplica gate opcional sem expor segredos', async t => {
   const dir = await mkdtemp(path.join(os.tmpdir(), 'anubis-readiness-'));
   await cp('src', path.join(dir, 'src'), { recursive: true });
-  await cp('../public', path.join(dir, 'public'), { recursive: true });
+  await cp('../admin', path.join(dir, 'public'), { recursive: true });
   await cp('package.json', path.join(dir, 'package.json'));
   const probe = http.createServer();
   await new Promise(resolve => probe.listen(0, '127.0.0.1', resolve));

@@ -9,7 +9,7 @@ import path from 'node:path';
 test('API de conciliação filtra por período, anota sem custo e preserva auditoria', async t => {
   const dir = await mkdtemp(path.join(os.tmpdir(), 'anubis-reconcile-test-'));
   await cp('src', path.join(dir, 'src'), { recursive: true });
-  await cp('../public', path.join(dir, 'public'), { recursive: true });
+  await cp('../admin', path.join(dir, 'public'), { recursive: true });
   await cp('package.json', path.join(dir, 'package.json'));
   const baseRecord = {
     provider: 'xkiro', connectionId: 'conn-1', clientKeyId: 'key-1', planId: null,

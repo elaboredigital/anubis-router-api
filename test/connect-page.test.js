@@ -10,7 +10,7 @@ import path from 'node:path';
 test('painel serve a página Conectar ferramenta e o catálogo sem exigir a chave administrativa', async t => {
   const dir = await mkdtemp(path.join(os.tmpdir(), 'anubis-connect-test-'));
   await cp('src', path.join(dir, 'src'), { recursive: true });
-  await cp('../public', path.join(dir, 'public'), { recursive: true });
+  await cp('../admin', path.join(dir, 'public'), { recursive: true });
   await cp('package.json', path.join(dir, 'package.json'));
   const probe = http.createServer();
   await new Promise(resolve => probe.listen(0, '127.0.0.1', resolve));

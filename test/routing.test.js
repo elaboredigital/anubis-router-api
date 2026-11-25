@@ -9,7 +9,7 @@ import path from 'node:path';
 test('política de roteamento persiste, aplica pesos, limita tentativas e audita mudanças', async t => {
   const dir = await mkdtemp(path.join(os.tmpdir(), 'anubis-routing-test-'));
   await cp('src', path.join(dir, 'src'), { recursive: true });
-  await cp('../public', path.join(dir, 'public'), { recursive: true });
+  await cp('../admin', path.join(dir, 'public'), { recursive: true });
   await cp('package.json', path.join(dir, 'package.json'));
   const attempts = [];
   const keys = new Set(['upstream-A-1234567890', 'upstream-B-1234567890']);

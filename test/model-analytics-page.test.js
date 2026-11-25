@@ -9,7 +9,7 @@ import path from 'node:path';
 test('endpoint /admin/model-analytics exige chave administrativa e período ISO UTC', async t => {
   const dir = await mkdtemp(path.join(os.tmpdir(), 'anubis-model-analytics-page-'));
   await cp('src', path.join(dir, 'src'), { recursive: true });
-  await cp('../public', path.join(dir, 'public'), { recursive: true });
+  await cp('../admin', path.join(dir, 'public'), { recursive: true });
   await cp('package.json', path.join(dir, 'package.json'));
   const probe = http.createServer();
   await new Promise(resolve => probe.listen(0, '127.0.0.1', resolve));

@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 
-const tools = JSON.parse(await readFile(new URL('../../public/connect-tools.json', import.meta.url), 'utf8'));
+const tools = JSON.parse(await readFile(new URL('../../admin/connect-tools.json', import.meta.url), 'utf8'));
 
 test('catálogo de ferramentas traz status honesto e exemplos sem segredo', () => {
   const allowed = new Set(['planejado', 'em homologação', 'disponível']);

@@ -9,7 +9,7 @@ import path from 'node:path';
 test('chat permanece dentro do mesmo painel, com a navegação e o login administrativos', async t => {
   const dir = await mkdtemp(path.join(os.tmpdir(), 'anubis-chat-page-'));
   await cp('src', path.join(dir, 'src'), { recursive: true });
-  await cp('../public', path.join(dir, 'public'), { recursive: true });
+  await cp('../admin', path.join(dir, 'public'), { recursive: true });
   await cp('package.json', path.join(dir, 'package.json'));
   const probe = http.createServer();
   await new Promise(resolve => probe.listen(0, '127.0.0.1', resolve));

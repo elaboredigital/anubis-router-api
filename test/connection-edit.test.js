@@ -9,7 +9,7 @@ import path from 'node:path';
 test('admin edita conexão sem expor segredo e revalida quando a credencial muda', async t => {
   const dir = await mkdtemp(path.join(os.tmpdir(), 'anubis-connection-edit-'));
   await cp('src', path.join(dir, 'src'), { recursive: true });
-  await cp('../public', path.join(dir, 'public'), { recursive: true });
+  await cp('../admin', path.join(dir, 'public'), { recursive: true });
   await cp('package.json', path.join(dir, 'package.json'));
   const keys = new Set(['upstream-OLD-1234567890', 'upstream-NEW-0987654321']);
   const requests = [];

@@ -9,7 +9,7 @@ import path from 'node:path';
 test('gateway isola chaves, encaminha a rota e preserva streaming', async t => {
   const dir = await mkdtemp(path.join(os.tmpdir(), 'anubis-test-'));
   await cp('src', path.join(dir, 'src'), { recursive: true });
-  await cp('../public', path.join(dir, 'public'), { recursive: true }); await cp('package.json', path.join(dir, 'package.json'));
+  await cp('../admin', path.join(dir, 'public'), { recursive: true }); await cp('package.json', path.join(dir, 'package.json'));
   let received;
   const attempts = [];
   const mock = http.createServer(async (req, res) => {

@@ -8,7 +8,7 @@ import path from 'node:path';
 
 async function startGateway(dir) {
   await cp('src', path.join(dir, 'src'), { recursive: true });
-  await cp('../public', path.join(dir, 'public'), { recursive: true });
+  await cp('../admin', path.join(dir, 'public'), { recursive: true });
   await cp('package.json', path.join(dir, 'package.json'));
   await mkdir(path.join(dir, 'extension'), { recursive: true });
   await cp('../extension/package.json', path.join(dir, 'extension', 'package.json'));

@@ -9,7 +9,7 @@ import path from 'node:path';
 test('painel /system monitora o sistema e permite configurar a retenção', async t => {
   const dir = await mkdtemp(path.join(os.tmpdir(), 'anubis-system-page-'));
   await cp('src', path.join(dir, 'src'), { recursive: true });
-  await cp('../public', path.join(dir, 'public'), { recursive: true });
+  await cp('../admin', path.join(dir, 'public'), { recursive: true });
   await cp('package.json', path.join(dir, 'package.json'));
   const probe = http.createServer();
   await new Promise(resolve => probe.listen(0, '127.0.0.1', resolve));
