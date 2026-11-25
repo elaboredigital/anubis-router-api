@@ -8,14 +8,15 @@ Este diretório tem seu próprio repositório Git (`git -C api status`); o repos
 | Pasta | Conteúdo |
 |---|---|
 | `src/` | servidor HTTP, gateway `/v1/*`, área do cliente `/me/*`, endpoints `/admin/*`, persistência, roteamento, preços, ledger, indicações e telemetria |
-| `test/` | testes unitários e de integração da API (108 testes) |
+| `test/` | testes unitários e de integração da API (109 testes) |
 | `scripts/` | servidor local com túnel SSH para o banco e importação do catálogo do MaxRouter |
 | `data/` | estado local em arquivos (ignorado pelo Git); em produção, `DATABASE_URL` aponta para o Postgres |
+| `extension/` | manifesto e VSIX servidos por `/admin/extension/*`; o build da API não depende de outros diretórios |
 
 A API não possui interface própria. As rotas de página (`/`, `/models`, `/users`, ...) só são
-servidas quando `ANUBIS_WEB_ROOT` aponta para uma pasta que contém `public/` e `extension/`.
-Durante a transição no monorepo, o valor `..` faz isso e permite continuar desenvolvendo os
-três projetos na mesma pasta. Em uma instalação isolada, essas rotas respondem `404`.
+servidas quando `ANUBIS_WEB_ROOT` aponta para uma pasta que contém `public/`. Durante a transição
+no monorepo, o valor `..` faz isso e permite continuar desenvolvendo os três projetos na mesma
+pasta. Em uma instalação isolada, essas rotas respondem `404`.
 
 ## Executar
 
@@ -24,7 +25,7 @@ cp .env.example .env       # preencher ANUBIS_ADMIN_KEY e ANUBIS_ENCRYPTION_KEY
 npm ci
 npm run dev                # local, com túnel SSH opcional para o banco de produção
 npm start                  # produção
-npm test                   # 108 testes, sem chamadas externas
+npm test                   # 109 testes, sem chamadas externas
 ```
 
 `npm start` carrega automaticamente `api/.env`. Na raiz do monorepo, `npm start` e `npm run dev`
@@ -43,10 +44,10 @@ carregam o `.env` da raiz, entram em `api/` e definem `ANUBIS_WEB_ROOT=..`.
 
 ## Docker
 
-O contexto do build é a raiz do monorepo porque o VSIX em `extension/` é servido pela API:
+O build usa somente o conteúdo de `api/`; o VSIX já está incluído em `api/extension/`:
 
 ```bash
-docker build -f api/Dockerfile -t anubis-api .
+docker build -t anubis-api ./api
 ```
 
 O healthcheck usa `GET /v1/models`, que responde `401` quando o processo está saudável.

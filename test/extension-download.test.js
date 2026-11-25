@@ -11,7 +11,7 @@ async function startGateway(dir) {
   await cp('../admin', path.join(dir, 'public'), { recursive: true });
   await cp('package.json', path.join(dir, 'package.json'));
   await mkdir(path.join(dir, 'extension'), { recursive: true });
-  await cp('../extension/package.json', path.join(dir, 'extension', 'package.json'));
+  await cp('extension/package.json', path.join(dir, 'extension', 'package.json'));
   const probe = http.createServer();
   await new Promise(resolve => probe.listen(0, '127.0.0.1', resolve));
   const port = probe.address().port;
@@ -41,7 +41,7 @@ test('painel oferece o VSIX somente com a chave administrativa', async t => {
   t.after(async () => { await gateway.stop(); await rm(dir, { recursive: true, force: true }); });
   const headers = { authorization: `Bearer ${gateway.adminKey}` };
   // A versão exibida vem do manifesto, então o teste acompanha cada aumento de versão.
-  const manifest = JSON.parse(await readFile(path.join('..', 'extension', 'package.json'), 'utf8'));
+  const manifest = JSON.parse(await readFile(path.join('extension', 'package.json'), 'utf8'));
   const version = manifest.version;
   const file = `anubis-router-vscode-${version}.vsix`;
 

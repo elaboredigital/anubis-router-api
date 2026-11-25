@@ -1,0 +1,106 @@
+{
+  "name": "anubis-router-vscode",
+  "displayName": "Anubis Router",
+  "description": "Chat com os modelos do Anubis Router dentro do editor, com contexto explícito e revisão de alterações.",
+  "version": "2.0.0",
+  "publisher": "anubis-router-local",
+  "license": "UNLICENSED",
+  "private": true,
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": "limited",
+      "description": "Chat e consulta de modelos funcionam em pastas não confiáveis; anexar contexto e aplicar alterações exigem Workspace Trust."
+    }
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/elaboredigital/anubis-router.git"
+  },
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "main": "./out/extension.js",
+  "activationEvents": [
+    "onView:anubisRouter.chat",
+    "onStartupFinished"
+  ],
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "anubisRouter",
+          "title": "Anubis Router",
+          "icon": "assets/icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "anubisRouter": [
+        {
+          "id": "anubisRouter.chat",
+          "name": "Chat",
+          "type": "webview"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "anubisRouter.openChat",
+        "title": "Anubis Router: Abrir chat"
+      },
+      {
+        "command": "anubisRouter.attachSelection",
+        "title": "Anubis Router: Anexar seleção ao chat"
+      },
+      {
+        "command": "anubisRouter.attachFile",
+        "title": "Anubis Router: Anexar arquivo atual ao chat"
+      },
+      {
+        "command": "anubisRouter.clearHistory",
+        "title": "Anubis Router: Limpar histórico do chat"
+      },
+      {
+        "command": "anubisRouter.openWebsite",
+        "title": "Anubis Router: Abrir anubisrouter.com"
+      }
+    ],
+    "configuration": {
+      "title": "Anubis Router",
+      "properties": {
+        "anubisRouter.baseUrl": {
+          "type": "string",
+          "default": "http://127.0.0.1:3210",
+          "description": "URL base do gateway Anubis. HTTP é permitido somente para localhost; use HTTPS para servidores remotos."
+        },
+        "anubisRouter.model": {
+          "type": "string",
+          "default": "",
+          "description": "ID público do modelo selecionado no gateway. Deixe vazio para escolher no chat."
+        },
+        "anubisRouter.maxContextChars": {
+          "type": "number",
+          "default": 12000,
+          "minimum": 100,
+          "maximum": 200000,
+          "description": "Limite de caracteres por anexo de contexto. A seleção não é truncada automaticamente."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "build": "tsc -p .",
+    "check": "tsc -p . --noEmit",
+    "test": "npm run build && node --test tests/*.spec.ts",
+    "package": "npx --yes @vscode/vsce package --no-dependencies",
+    "release": "npm version patch --no-git-tag-version && npm run test && npm run package"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/vscode": "^1.85.0",
+    "typescript": "^5.9.0"
+  }
+}

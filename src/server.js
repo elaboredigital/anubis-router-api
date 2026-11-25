@@ -33,7 +33,7 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 // enquanto site público e painel ainda são servidos por este processo durante a separação.
 const webRoot = path.resolve(root, process.env.ANUBIS_WEB_ROOT || '.');
 const webFile = file => path.join(webRoot, file);
-const extensionDir = webFile('extension');
+const extensionDir = path.join(root, 'extension');
 // A versão exibida no painel vem do manifesto da extensão; o nome do VSIX acompanha essa versão.
 let extensionVersion = '0.1.0';
 try {
