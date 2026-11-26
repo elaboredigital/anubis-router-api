@@ -52,7 +52,7 @@ export function safeKey(key, plans = [], root = rootKeyId(key)) {
 export function buildSelfServiceSummary({ key, keys = [], plans = [], records = [], entries = [], topups = [], now = new Date().toISOString() } = {}) {
   if (!key) return null;
   const root = rootKeyId(key);
-  const home = buildClientHome({ key, plan: plans.find(item => item.id === key.planId) || null, records, entries, topups, plans, now });
+  const home = buildClientHome({ key, plan: plans.find(item => item.id === key.planId) || null, records, entries, topups, plans, keys, now });
   return {
     ...home,
     account: { ...home.account, id: key.id, isRoot: key.id === root },

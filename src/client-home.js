@@ -99,7 +99,7 @@ function percent(used, limit) {
 }
 
 /** Tudo o que a home do cliente pode ver. Nenhum campo bruto de chave, uso ou ledger sai daqui. */
-export function buildClientHome({ key, plan, records, entries, topups, plans = [], now = new Date().toISOString() } = {}) {
+export function buildClientHome({ key, plan, records, entries, topups, plans = [], keys = [], now = new Date().toISOString() } = {}) {
   if (!key || typeof key !== 'object') return null;
   const allRecords = list(records);
   const allEntries = list(entries).filter(entry => entry?.keyId === key.id);
@@ -118,7 +118,10 @@ export function buildClientHome({ key, plan, records, entries, topups, plans = [
   const dailyQuota = checkDailyQuota(plan, dayUsage);
   const hasDailyLimit = plan?.dailyTokens != null || plan?.dailyRequests != null;
   const resetAt = hasDailyLimit ? day.end : (quota.resetAt || month.end);
-  const wallet = buildWallets([key], plans, topups, allEntries)[0] || null;
+  // Saldo da conta: soma recargas e gastos de todas as chaves do titular (a principal e as criadas a partir dela).
+  const owner = key.parentId || key.id;
+  const family = list(keys).filter(item => item && (item.id === owner || item.parentId === owner));
+  const wallet = buildWallets(family.length ? family : [key], plans, topups, list(entries)).find(item => item.keyId === owner) || null;
   const firstEntry = allEntries.filter(entry => entry.startedAt).map(entry => entry.startedAt).sort()[0];
   const models = Array.isArray(plan?.models) ? plan.models : [];
 

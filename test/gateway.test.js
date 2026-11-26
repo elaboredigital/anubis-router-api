@@ -82,7 +82,7 @@ test('gateway isola chaves, encaminha a rota e preserva streaming', async t => {
   response = await fetch(`${base}/admin/connections/${secondConnection.id}/models`, { headers: adminHeaders });
   assert.equal((await response.json()).models.find(m => m.id === 'remote/model').enabled, false);
   assert.equal((await readFile(path.join(dir, 'data', 'credentials.json'), 'utf8')).includes(providerKey), false);
-  response = await fetch(`${base}/admin/keys`, { method: 'POST', headers: adminHeaders, body: JSON.stringify({ name: 'Claude Code' }) });
+  response = await fetch(`${base}/admin/keys`, { method: 'POST', headers: adminHeaders, body: JSON.stringify({ name: 'Claude Code', planId: null }) });
   assert.equal(response.status, 201); const created = await response.json(); const apiKey = created.key;
   assert.equal((await readFile(path.join(dir, 'data', 'api-keys.json'), 'utf8')).includes(apiKey), false);
   assert.equal((await fetch(`${base}/admin/routes`, { headers: { authorization: `Bearer ${apiKey}` } })).status, 401);
@@ -203,7 +203,7 @@ test('gateway isola chaves, encaminha a rota e preserva streaming', async t => {
   assert.equal(billing.sales.find(item => item.currency === 'USD').sale, '0.12');
   assert.equal(billing.sales.find(item => item.currency === 'USD').marginPercent, 66.7);
   const plansReport = await (await fetch(`${base}/admin/plans`, { headers: adminHeaders })).json();
-  assert.equal(plansReport.plans.length, 2); assert.equal(plansReport.providerUsage.length >= 1, true);
+  assert.equal(plansReport.plans.length, 3, 'gratuito, créditos e o plano do teste'); assert.equal(plansReport.providerUsage.length >= 1, true);
   response = await fetch(`${base}/admin/keys/plan`, { method: 'POST', headers: adminHeaders, body: JSON.stringify({ id: planKeyCreated.id, planId: null }) });
   assert.equal(response.status, 200);
   response = await fetch(`${base}/v1/chat/completions`, { method: 'POST', headers: planHeaders, body: JSON.stringify({ model: 'meu/modelo', messages: [] }) });

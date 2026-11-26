@@ -33,8 +33,12 @@ export function buildWallets(keys, plans, topups, entries) {
   const walletList = Array.isArray(keys) ? keys : [];
   const planList = Array.isArray(plans) ? plans : [];
   const wallets = new Map();
-  const createWallet = (key, currency, plan) => ({
-    keyId: key.id, keyName: typeof key.name === 'string' ? key.name : '', planId: key.planId || null,
+  // O saldo é da conta: chaves criadas a partir da principal (parentId) creditam e gastam a carteira dela.
+  const byId = new Map(walletList.filter(key => key?.id).map(key => [key.id, key]));
+  const rootOf = id => byId.get(id)?.parentId || id;
+  // A carteira sempre leva o ID da conta (chave principal), mesmo quando só uma chave filha foi informada.
+  const createWallet = (key, currency, plan, ownerId = key.id) => ({
+    keyId: ownerId, keyName: typeof key.name === 'string' ? key.name : '', planId: key.planId || null,
     planName: plan ? (typeof plan.name === 'string' ? plan.name : '') : 'Recarga avulsa',
     currency, creditUnits: 0n, debitUnits: 0n, requests: 0, pending: 0,
   });
@@ -42,8 +46,10 @@ export function buildWallets(keys, plans, topups, entries) {
     if (!key?.id) continue;
     const plan = planList.find(item => item?.id === key.planId);
     if (!plan || plan.kind !== 'payg' || !CURRENCY.test(plan.currency || '')) continue;
-    const wallet = createWallet(key, plan.currency, plan);
-    wallets.set(`${key.id}\u0000${wallet.currency}`, wallet);
+    const ownerId = rootOf(key.id);
+    const owner = byId.get(ownerId) || key;
+    const marker = `${ownerId}\u0000${plan.currency}`;
+    if (!wallets.has(marker)) wallets.set(marker, createWallet(owner, plan.currency, planList.find(item => item?.id === owner.planId) || plan, ownerId));
   }
 
   const seenTopups = new Set();
@@ -54,12 +60,13 @@ export function buildWallets(keys, plans, topups, entries) {
     seenTopups.add(marker);
     const units = decimalUnits(item.amount);
     if (units === null) continue;
-    const markerKey = `${item.keyId}\u0000${item.currency}`;
+    const ownerId = rootOf(item.keyId);
+    const markerKey = `${ownerId}\u0000${item.currency}`;
     if (!wallets.has(markerKey)) {
-      const key = walletList.find(candidate => candidate?.id === item.keyId);
+      const key = byId.get(ownerId) || byId.get(item.keyId);
       if (!key) continue;
       const plan = planList.find(candidate => candidate?.id === key.planId) || null;
-      wallets.set(markerKey, createWallet(key, item.currency, plan));
+      wallets.set(markerKey, createWallet(key, item.currency, plan, ownerId));
     }
     wallets.get(markerKey).creditUnits += units;
   }
@@ -70,7 +77,8 @@ export function buildWallets(keys, plans, topups, entries) {
     const marker = item.id || item.requestId;
     if (marker && seenEntries.has(marker)) continue;
     if (marker) seenEntries.add(marker);
-    const owned = [...wallets.values()].filter(wallet => wallet.keyId === item.keyId);
+    const ownerId = rootOf(item.keyId);
+    const owned = [...wallets.values()].filter(wallet => wallet.keyId === ownerId);
     if (!owned.length) continue;
     const currency = item.saleCurrency || item.currency;
     const wallet = owned.find(candidate => candidate.currency === currency);

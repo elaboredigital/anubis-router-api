@@ -58,5 +58,5 @@ test('painel serve top up PAYG com recargas simuladas e plano pronto', async t =
   assert.deepEqual(report.topups, []);
   assert.equal(report.scope, 'manual_topups');
   const plans = await (await fetch(`${base}/admin/plans`, { headers: { authorization: 'Bearer admin-key-1234567890123' } })).json();
-  assert.equal(plans.plans.some(plan => plan.kind === 'payg'), false);
+  assert.equal(plans.plans.filter(plan => plan.kind === 'payg').map(plan => plan.id).join(), 'credits', 'só o plano padrão de créditos');
 });

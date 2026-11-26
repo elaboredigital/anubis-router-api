@@ -67,7 +67,7 @@ test('política de roteamento persiste, aplica pesos, limita tentativas e audita
   for (const connection of [connectionA, connectionB]) {
     for (const id of ['remote/model', 'remote/fail']) assert.equal((await post(`/admin/connections/${connection.id}/models`, { id, enabled: true })).status, 200);
   }
-  const apiKey = (await post('/admin/keys', { name: 'Cliente' })).body.key;
+  const apiKey = (await post('/admin/keys', { name: 'Cliente', planId: null })).body.key;
   const call = async (model, extra = {}) => {
     const response = await fetch(`${base}/v1/chat/completions`, { method: 'POST', headers: { authorization: `Bearer ${apiKey}`, 'content-type': 'application/json' }, body: JSON.stringify({ model, messages: [], ...extra }) });
     await response.text();

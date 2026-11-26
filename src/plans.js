@@ -98,6 +98,8 @@ export function checkDailyQuota(plan, usage) {
 
 export function planAllowsModel(plan, modelId) {
   if (!plan) return true;
+  // Créditos pré-pagos sem lista de modelos liberam todo o catálogo: o saldo é o limite.
+  if (plan.kind === 'payg' && (!Array.isArray(plan.models) || !plan.models.length)) return true;
   return Array.isArray(plan.models) && plan.models.includes(modelId);
 }
 

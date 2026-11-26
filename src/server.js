@@ -27,6 +27,7 @@ import { buildModelAnalytics } from './model-analytics.js';
 import { buildReadiness, normalizeReadinessUpdate, validateReadinessUpdate, commercialBlock, CONNECTION_BLOCKED, DEFAULT_READINESS_POLICY } from './provider-readiness.js';
 import { MAXROUTER_PRICING_PAGE, MAXROUTER_PRICING_URL, parseMaxRouterPrices } from './maxrouter-pricing.js';
 import { buildPublicCatalog, modelPricing } from './public-catalog.js';
+import { CREDIT_PLAN, TOPUP_PRESETS, MIN_TOPUP, MAX_TOPUP, ensureCreditPlan, validateTopupRequest, clientTopupRequest, clientStatement, spendByModel } from './credits.js';
 import { makeReferralCode, safeText, normalizeReferral, validateRegister, validateQualify, applyQualify, validateStatus, applyStatus, buildClientReferralReport, buildAdminReferralReport, validateMoveCredit } from './referrals.js';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -100,6 +101,10 @@ plans = plans.map(plan => {
 if (!Array.isArray(clientKeys) || !credentials || Array.isArray(credentials) || typeof credentials !== 'object') throw new Error('Dados persistidos inválidos');
 let ledger = await store.load('ledger', []);
 if (!Array.isArray(ledger)) throw new Error('Ledger inválido');
+// Plano padrão de créditos pré-pagos em USD: criado uma vez, depois editável pelo admin como qualquer plano.
+if (!plans.some(plan => plan?.id === CREDIT_PLAN.id)) { plans = ensureCreditPlan(plans); await store.save('plans', plans); }
+let topupRequests = await store.load('topup-requests', []);
+if (!Array.isArray(topupRequests)) throw new Error('Pedidos de recarga inválidos');
 let topups = await store.load('topups', []);
 if (!Array.isArray(topups)) throw new Error('Recargas inválidas');
 let routingPolicy = normalizeRoutingPolicy(await store.load('routing-policy', DEFAULT_ROUTING_POLICY));
@@ -708,6 +713,48 @@ const server = http.createServer(async (req, res) => {
         const wallet = buildWallets(clientKeys, plans, topups, ledger).find(item => item.keyId === topup.keyId) || null;
         return json(res, duplicate ? 200 : 201, { topup: saved, wallet, duplicate });
       }
+      // Pedidos de recarga dos clientes: o admin confirma o pagamento e o valor entra como recarga na conta.
+      if (req.method === 'GET' && url.pathname === '/admin/topup-requests') {
+        const wallets = new Map(buildWallets(clientKeys, plans, topups, ledger).map(item => [item.keyId, item]));
+        const items = [...topupRequests].sort((a, b) => (a.status === 'pending') === (b.status === 'pending') ? b.createdAt.localeCompare(a.createdAt) : a.status === 'pending' ? -1 : 1)
+          .slice(0, 200).map(item => {
+            const owner = clientKeys.find(key => key.id === item.keyId);
+            return { ...item, keyName: owner?.name || 'Chave removida', keyLabel: owner?.prefix ? `${owner.prefix}••••••••` : '—', balance: wallets.get(item.keyId)?.balance ?? null };
+          });
+        return json(res, 200, { requests: items, pending: topupRequests.filter(item => item.status === 'pending').length });
+      }
+      const topupDecision = /^\/admin\/topup-requests\/([\w-]{1,80})\/(approve|reject)$/.exec(url.pathname);
+      if (req.method === 'POST' && topupDecision) {
+        const data = /^application\/json\b/i.test(req.headers['content-type'] || '') ? await body(req) : {};
+        const note = typeof data.note === 'string' ? data.note.trim().slice(0, 160) : '';
+        let result = null; let failure = null;
+        await mutate(async () => {
+          const current = topupRequests.find(item => item.id === topupDecision[1]);
+          if (!current) { failure = [404, 'Pedido não encontrado.']; return; }
+          if (current.status !== 'pending') { failure = [409, 'Este pedido já foi decidido.']; return; }
+          const decidedAt = new Date().toISOString();
+          let updated;
+          if (topupDecision[2] === 'approve') {
+            const owner = clientKeys.find(key => key.id === current.keyId);
+            if (!owner || owner.active === false) { failure = [400, 'A conta deste pedido está revogada.']; return; }
+            const topup = { id: randomUUID(), keyId: current.keyId, amount: current.amount, currency: current.currency, note: note || `Recarga solicitada pelo cliente`, idempotencyKey: `request-${current.id}`, planId: owner.planId || null, createdAt: decidedAt, requestId: current.id };
+            const nextTopups = [...topups, topup]; await store.save('topups', nextTopups); topups = nextTopups;
+            // Quem compra crédito passa a ser cobrado pelo saldo: chaves da conta sem plano entram no plano de créditos.
+            if (clientKeys.some(key => (key.id === owner.id || key.parentId === owner.id) && !key.planId)) {
+              const nextKeys = clientKeys.map(key => (key.id === owner.id || key.parentId === owner.id) && !key.planId ? { ...key, planId: CREDIT_PLAN.id } : key);
+              await store.save('api-keys', nextKeys); clientKeys = nextKeys;
+            }
+            updated = { ...current, status: 'approved', decidedAt, topupId: topup.id, note: note || null };
+          } else {
+            updated = { ...current, status: 'rejected', decidedAt, reason: note || 'Pagamento não confirmado.' };
+          }
+          const next = topupRequests.map(item => item.id === current.id ? updated : item);
+          await store.save('topup-requests', next); topupRequests = next; result = updated;
+        });
+        if (failure) return json(res, failure[0], { error: failure[1] });
+        const wallet = buildWallets(clientKeys, plans, topups, ledger).find(item => item.keyId === result.keyId) || null;
+        return json(res, 200, { request: result, wallet });
+      }
       // Indicações: apenas registro administrativo. Nenhum depósito é cobrado e nenhum crédito é pago.
       if (req.method === 'GET' && url.pathname === '/admin/referrals') {
         await ensureReferralCodes();
@@ -1075,7 +1122,9 @@ const server = http.createServer(async (req, res) => {
           if (typeof data.name !== 'string' || !data.name.trim() || data.name.trim().length > 80) return json(res, 400, { error: 'Informe um nome com até 80 caracteres' });
           if (data.planId && !plans.some(p => p.id === data.planId)) return json(res, 400, { error: 'Plano não encontrado' });
           const value = `anubis_${randomBytes(32).toString('base64url')}`;
-          const item = { id: randomUUID(), name: data.name.trim(), prefix: value.slice(0, 15), hash: digest(value), active: true, createdAt: new Date().toISOString(), planId: data.planId || null };
+          // Sem plano informado, a chave nova usa créditos pré-pagos; null explícito cria a chave sem plano.
+          const planId = data.planId === undefined ? CREDIT_PLAN.id : data.planId || null;
+          const item = { id: randomUUID(), name: data.name.trim(), prefix: value.slice(0, 15), hash: digest(value), active: true, createdAt: new Date().toISOString(), planId };
           await mutate(async () => {
             const next = [...clientKeys, item]; await store.save('api-keys', next); clientKeys = next;
             referralCodes[item.id] = makeReferralCode(); await store.save('referral-codes', referralCodes);
@@ -1177,6 +1226,28 @@ const server = http.createServer(async (req, res) => {
         const report = buildSelfServiceSummary({ key, keys: clientKeys, plans, records: await usageStore.list(), entries: ledger, topups, now });
         return json(res, 200, report);
       }
+      // Créditos da conta: saldo, pedidos de recarga e extrato de gastos. O saldo é do titular (chave principal).
+      if (req.method === 'GET' && url.pathname === '/me/credits') {
+        const familyKeys = family();
+        const wallet = buildWallets(familyKeys, plans, topups, ledger).find(item => item.keyId === root) || null;
+        const statement = clientStatement(ledger, familyKeys, 50);
+        return json(res, 200, {
+          wallet: wallet ? { currency: wallet.currency, balance: wallet.balance, credits: wallet.credits, consumed: wallet.consumed, requests: wallet.requests, negative: wallet.negative } : null,
+          presets: TOPUP_PRESETS, min: MIN_TOPUP, max: MAX_TOPUP, currency: 'USD',
+          requests: topupRequests.filter(item => item.keyId === root).sort((a, b) => b.createdAt.localeCompare(a.createdAt)).slice(0, 20).map(clientTopupRequest),
+          statement, byModel: spendByModel(clientStatement(ledger, familyKeys, 200)),
+        });
+      }
+      if (req.method === 'POST' && url.pathname === '/me/topup-requests') {
+        if (!/^application\/json\b/i.test(req.headers['content-type'] || '')) return json(res, 415, { error: 'Use application/json' });
+        const data = await body(req);
+        const pending = topupRequests.filter(item => item.keyId === root && item.status === 'pending').length;
+        const checked = validateTopupRequest(data, pending);
+        if (checked.error) return json(res, 400, { error: checked.error });
+        const item = { id: randomUUID(), keyId: root, requestedBy: key.id, amount: checked.amount, currency: checked.currency, status: 'pending', createdAt: now, decidedAt: null, reason: null, topupId: null };
+        await mutate(async () => { const next = [...topupRequests, item]; await store.save('topup-requests', next); topupRequests = next; });
+        return json(res, 201, { request: clientTopupRequest(item) });
+      }
       if (req.method === 'GET' && url.pathname === '/me/stats') {
         const period = periodFrom(url);
         if (period.error) return json(res, 400, { error: period.error });
@@ -1267,7 +1338,7 @@ const server = http.createServer(async (req, res) => {
       const compatible = available.filter(r => !connector(connectionForRoute(r).provider)?.chatOnly || url.pathname === '/v1/chat/completions');
       if (!compatible.length) return json(res, 400, { error: { message: 'Nenhum destino suporta este endpoint' } });
       // Saldo simulado é verificado antes da chamada; não há reserva, então chamadas concorrentes podem exceder o limite.
-      const paygWallet = clientPlan?.kind === 'payg' ? buildWallets([clientKey], plans, topups, ledger)[0] : null;
+      const paygWallet = clientPlan?.kind === 'payg' ? buildWallets(ownerKeys(clientKeys, clientKey), plans, topups, ledger).find(item => item.keyId === rootKeyId(clientKey)) || null : null;
       let insufficient = null; let attempted = false;
       const controller = new AbortController();
       let cancelled = false;

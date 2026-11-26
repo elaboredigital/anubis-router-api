@@ -39,7 +39,7 @@ test('buildAdminUsers agrupa chaves pelo dono e soma saldo apenas dentro da mesm
   assert.equal(ana.keyCount, 2);
   assert.equal(ana.activeKeys, 2);
   assert.equal(ana.blocked, false);
-  assert.deepEqual(ana.wallets.find(item => item.currency === 'USD'), { currency: 'USD', keys: 2, credits: '15.5', consumed: '2', balance: '13.5', requests: 1, pending: 1, negative: false });
+  assert.deepEqual(ana.wallets.find(item => item.currency === 'USD'), { currency: 'USD', keys: 1, credits: '15.5', consumed: '2', balance: '13.5', requests: 1, pending: 1, negative: false });
   assert.deepEqual(ana.wallets.find(item => item.currency === 'EUR'), { currency: 'EUR', keys: 1, credits: '20', consumed: '0', balance: '20', requests: 0, pending: 0, negative: false });
   assert.deepEqual(ana.referrals.stats.earned, { amount: '0.00', currency: 'USD' });
   assert.equal(ana.referrals.stats.qualified, 1);

@@ -84,7 +84,7 @@ test('painel /users reúne titulares, saldo, chaves e indicações sem expor seg
   const ana = report.users.find(user => user.id === first.id);
   assert.equal(ana.keyCount, 2);
   assert.equal(ana.activeKeys, 2);
-  assert.deepEqual(ana.wallets.find(item => item.currency === 'USD'), { currency: 'USD', keys: 2, credits: '15.5', consumed: '0', balance: '15.5', requests: 0, pending: 0, negative: false });
+  assert.deepEqual(ana.wallets.find(item => item.currency === 'USD'), { currency: 'USD', keys: 1, credits: '15.5', consumed: '0', balance: '15.5', requests: 0, pending: 0, negative: false });
   assert.equal(ana.referrals.stats.signups, 1);
   assert.equal(ana.referrals.stats.qualified, 1);
   assert.equal(ana.referrals.records.length, 1);
