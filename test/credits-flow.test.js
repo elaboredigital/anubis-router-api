@@ -5,6 +5,7 @@ import { spawn } from 'node:child_process';
 import { mkdtemp, cp, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { createHash } from 'node:crypto';
 import { validateTopupRequest, clientStatement, spendByModel, ensureCreditPlan, CREDIT_PLAN, paymentSignature, verifyPaymentSignature } from '../src/credits.js';
 import { buildWallets } from '../src/topup.js';
 
@@ -73,7 +74,7 @@ test('fluxo de créditos: cliente pede recarga, admin aprova, chamada desconta d
   const probe = http.createServer(); await new Promise(resolve => probe.listen(0, '127.0.0.1', resolve));
   const port = probe.address().port; await new Promise(resolve => probe.close(resolve));
   const adminKey = 'admin-key-1234567890123';
-  const child = spawn(process.execPath, [path.join(dir, 'src/server.js')], { env: { ...process.env, NODE_ENV: 'test', PORT: String(port), TEST_UPSTREAM_URL: `http://127.0.0.1:${mock.address().port}`, ANUBIS_ADMIN_KEY: adminKey, ANUBIS_ENCRYPTION_KEY: 'ab'.repeat(32), DATABASE_URL: '', ANUBIS_PAYMENT_WEBHOOK_SECRET: 'segredo-de-teste-com-mais-de-32-caracteres' }, stdio: ['ignore', 'pipe', 'pipe'] });
+  const child = spawn(process.execPath, [path.join(dir, 'src/server.js')], { env: { ...process.env, NODE_ENV: 'test', PORT: String(port), TEST_UPSTREAM_URL: `http://127.0.0.1:${mock.address().port}`, ANUBIS_ADMIN_KEY: adminKey, ANUBIS_ENCRYPTION_KEY: 'ab'.repeat(32), DATABASE_URL: '', ANUBIS_PAYMENT_WEBHOOK_SECRET: 'segredo-de-teste-com-mais-de-32-caracteres', PAYSSION_API_KEY: 'pk_teste', PAYSSION_SECRET_KEY: 'sk_teste', PAYSSION_SANDBOX: 'true', ANUBIS_SITE_URL: 'https://site.example' }, stdio: ['ignore', 'pipe', 'pipe'] });
   t.after(async () => { child.kill(); await new Promise(resolve => mock.close(resolve)); await rm(dir, { recursive: true, force: true }); });
   await new Promise((resolve, reject) => { child.stdout.once('data', resolve); child.once('exit', code => reject(new Error(`server exited ${code}`))); });
   const base = `http://127.0.0.1:${port}`;
@@ -164,6 +165,34 @@ test('fluxo de créditos: cliente pede recarga, admin aprova, chamada desconta d
   assert.equal((await confirm({ requestId: paid.id, amount: '25', currency: 'USD', reference: 'pix-999' })).status, 409);
   credits = await (await fetch(`${base}/me/credits`, { headers: client })).json();
   assert.equal(credits.wallet.balance, '34.85', 'recarga confirmada entra uma única vez');
+
+  // Payssion: checkout da página hospedada e notificação assinada (md5 com campos separados por "|").
+  const md5 = text => createHash('md5').update(text).digest('hex');
+  response = await post('/me/topup-requests', { amount: '50' }, client);
+  const viaPayssion = (await response.json()).request;
+  response = await post(`/me/topup-requests/${viaPayssion.id}/checkout`, {}, client);
+  assert.equal(response.status, 200);
+  const checkout = await response.json();
+  assert.equal(checkout.action, 'http://sandbox.payssion.com/checkout/pk_teste');
+  assert.equal(checkout.fields.amount, '50.00');
+  assert.equal(checkout.fields.order_id, viaPayssion.id);
+  assert.equal(checkout.fields.api_sig, md5(['pk_teste', '50.00', 'USD', viaPayssion.id, 'sk_teste'].join('|')));
+  assert.equal(checkout.fields.return_url, 'https://site.example/minha-conta?pagamento=retorno');
+  assert.doesNotMatch(JSON.stringify(checkout), /sk_teste/);
+  const notify = (state, amount = '50.00', sig) => {
+    const data = { app_name: 'anubis', pm_id: 'pix_br', transaction_id: 'T123', order_id: viaPayssion.id, amount, paid: amount, currency: 'USD', state };
+    data.notify_sig = sig || md5(['pk_teste', data.pm_id, data.amount, data.currency, data.order_id, data.state, 'sk_teste'].join('|'));
+    return fetch(`${base}/payments/payssion/notify`, { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams(data).toString() });
+  };
+  assert.equal((await notify('completed', '50.00', 'f'.repeat(32))).status, 400, 'assinatura errada');
+  response = await notify('pending'); assert.equal(response.status, 200); assert.equal((await response.json()).credited, false);
+  response = await notify('completed', '5.00'); assert.equal((await response.json()).reason, 'valor_divergente');
+  response = await notify('completed'); assert.equal(response.status, 200); assert.equal((await response.json()).credited, true);
+  response = await notify('completed'); assert.equal((await response.json()).credited, false, 'reenvio não credita de novo');
+  credits = await (await fetch(`${base}/me/credits`, { headers: client })).json();
+  assert.equal(credits.wallet.balance, '84.85');
+  assert.equal(credits.checkout.enabled, true);
+  assert.equal((await post(`/me/topup-requests/${viaPayssion.id}/checkout`, {}, client)).status, 409, 'pedido pago não gera novo checkout');
 });
 
 test('assinatura de pagamento exige segredo longo, janela de 5 minutos e HMAC correto', () => {

@@ -1,7 +1,7 @@
 // Créditos pré-pagos do cliente: o cliente pede uma recarga ($5, $10 ou mais), o admin confirma o pagamento
 // e o valor vira uma recarga na carteira da conta. Cada chamada concluída desconta o preço de venda do modelo.
-// Não há checkout aqui: a confirmação do pagamento é feita por uma pessoa no admin.
-import { createHmac, timingSafeEqual } from 'node:crypto';
+// O pagamento é confirmado pelo admin, pela Payssion (página de pagamento hospedada) ou por um webhook assinado.
+import { createHash, createHmac, timingSafeEqual } from 'node:crypto';
 import { decimalUnits, formatUnits } from './dashboard.js';
 
 export const CREDIT_PLAN = Object.freeze({
@@ -99,4 +99,48 @@ export function validatePaymentConfirmation(data, request) {
   if (paid === null || paid !== decimalUnits(request.amount)) return `Valor pago difere do pedido (US$ ${request.amount}).`;
   if ((data.currency || 'USD') !== request.currency) return `Moeda difere do pedido (${request.currency}).`;
   return null;
+}
+
+// Payssion (https://www.payssion.com/en/docs/): página de pagamento hospedada, em que o cliente escolhe o meio
+// (PIX, boleto, cartão). Assinaturas em MD5 com campos unidos por "|", conforme a documentação oficial:
+// pedido hospedado = md5(api_key|amount|currency|order_id|secret_key);
+// notificação      = md5(api_key|pm_id|amount|currency|order_id|state|secret_key).
+const md5 = text => createHash('md5').update(text).digest('hex');
+export function payssionConfig(env = process.env) {
+  const apiKey = (env.PAYSSION_API_KEY || '').trim();
+  const secretKey = (env.PAYSSION_SECRET_KEY || '').trim();
+  if (!apiKey || !secretKey) return null;
+  const sandbox = /^(1|true|sim|yes)$/i.test(env.PAYSSION_SANDBOX || '');
+  return { apiKey, secretKey, sandbox, base: sandbox ? 'http://sandbox.payssion.com' : 'https://www.payssion.com' };
+}
+/** Valor no formato que vai assinado e enviado: duas casas decimais. */
+export const payssionAmount = amount => (Number(decimalUnits(amount)) / 1e12).toFixed(2);
+export function payssionCheckout(config, request, { returnUrl, payerEmail = '' } = {}) {
+  const amount = payssionAmount(request.amount);
+  const fields = {
+    api_sig: md5([config.apiKey, amount, request.currency, request.id, config.secretKey].join('|')),
+    order_id: request.id, amount, currency: request.currency,
+    description: `Anubis Router - credito US$ ${amount}`,
+    return_url: returnUrl,
+  };
+  if (payerEmail) fields.payer_email = payerEmail;
+  return { provider: 'payssion', action: `${config.base}/checkout/${encodeURIComponent(config.apiKey)}`, method: 'POST', fields };
+}
+export function payssionNotifySignature(config, data) {
+  return md5([config.apiKey, data.pm_id, data.amount, data.currency, data.order_id, data.state, config.secretKey].map(value => value ?? '').join('|'));
+}
+/**
+ * Avalia uma notificação da Payssion. Só `completed` (ou `paid_more`) com o mesmo valor e moeda do pedido credita.
+ * Devolve { error } para assinatura inválida, ou { approve, reason } para o servidor decidir.
+ */
+export function evaluatePayssionNotify(config, data, request) {
+  if (!data || typeof data !== 'object') return { error: 'Notificação vazia.' };
+  const expected = Buffer.from(payssionNotifySignature(config, data));
+  const given = Buffer.from(String(data.notify_sig || '').toLowerCase());
+  if (expected.length !== given.length || !timingSafeEqual(expected, given)) return { error: 'Assinatura da Payssion inválida.' };
+  if (!request) return { approve: false, reason: 'pedido_desconhecido' };
+  if (!['completed', 'paid_more'].includes(data.state)) return { approve: false, reason: `estado_${data.state || 'vazio'}` };
+  if (data.currency !== request.currency) return { approve: false, reason: 'moeda_divergente' };
+  if (payssionAmount(data.amount) !== payssionAmount(request.amount)) return { approve: false, reason: 'valor_divergente' };
+  return { approve: true, reason: null };
 }

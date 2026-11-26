@@ -27,7 +27,7 @@ import { buildModelAnalytics } from './model-analytics.js';
 import { buildReadiness, normalizeReadinessUpdate, validateReadinessUpdate, commercialBlock, CONNECTION_BLOCKED, DEFAULT_READINESS_POLICY } from './provider-readiness.js';
 import { MAXROUTER_PRICING_PAGE, MAXROUTER_PRICING_URL, parseMaxRouterPrices } from './maxrouter-pricing.js';
 import { buildPublicCatalog, modelPricing } from './public-catalog.js';
-import { CREDIT_PLAN, TOPUP_PRESETS, MIN_TOPUP, MAX_TOPUP, ensureCreditPlan, validateTopupRequest, clientTopupRequest, clientStatement, spendByModel, verifyPaymentSignature, validatePaymentConfirmation } from './credits.js';
+import { CREDIT_PLAN, TOPUP_PRESETS, MIN_TOPUP, MAX_TOPUP, ensureCreditPlan, validateTopupRequest, clientTopupRequest, clientStatement, spendByModel, verifyPaymentSignature, validatePaymentConfirmation, payssionConfig, payssionCheckout, evaluatePayssionNotify } from './credits.js';
 import { makeReferralCode, safeText, normalizeReferral, validateRegister, validateQualify, applyQualify, validateStatus, applyStatus, buildClientReferralReport, buildAdminReferralReport, validateMoveCredit } from './referrals.js';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -1240,6 +1240,30 @@ const server = http.createServer(async (req, res) => {
       if (outcome.failure) return json(res, outcome.failure[0], { error: outcome.failure[1] });
       return json(res, 200, { request: clientTopupRequest(outcome.request), duplicate: false });
     }
+    // Notificação da Payssion (Notify URL do app): credita o pedido quando o pagamento foi concluído e bate com ele.
+    if (req.method === 'POST' && url.pathname === '/payments/payssion/notify') {
+      const config = payssionConfig();
+      if (!config) return json(res, 404, { error: 'Rota não encontrada' });
+      const chunks = []; let size = 0;
+      for await (const chunk of req) { size += chunk.length; if (size > 64 * 1024) return json(res, 413, { error: 'Corpo muito grande.' }); chunks.push(chunk); }
+      const raw = Buffer.concat(chunks).toString('utf8');
+      let data;
+      try { data = /^application\/json\b/i.test(req.headers['content-type'] || '') ? JSON.parse(raw) : Object.fromEntries(new URLSearchParams(raw)); }
+      catch { return json(res, 400, { error: 'Corpo inválido.' }); }
+      const request = typeof data?.order_id === 'string' ? topupRequests.find(item => item.id === data.order_id) : null;
+      const verdict = evaluatePayssionNotify(config, data, request);
+      if (verdict.error) return json(res, 400, { error: verdict.error });
+      const reference = typeof data.transaction_id === 'string' ? data.transaction_id.slice(0, 120) : '';
+      if (!verdict.approve) {
+        console.log(`Payssion: pedido ${data.order_id || '?'} não creditado (${verdict.reason}), transação ${reference || '?'}`);
+        return json(res, 200, { ok: true, credited: false, reason: verdict.reason });
+      }
+      if (request.status === 'approved') return json(res, 200, { ok: true, credited: false, reason: 'ja_creditado' });
+      const payment = { provider: 'payssion', reference, method: typeof data.pm_id === 'string' ? data.pm_id.slice(0, 40) : null, confirmedAt: new Date().toISOString() };
+      const outcome = await decideTopupRequest(request.id, 'approve', `Pago via Payssion (${reference})`, payment);
+      if (outcome.failure && outcome.failure[0] !== 409) return json(res, outcome.failure[0], { error: outcome.failure[1] });
+      return json(res, 200, { ok: true, credited: !outcome.failure });
+    }
     // Revogação da sessão escolhida no painel, feita pelo próprio portador do token (sem chave administrativa).
     if (req.method === 'DELETE' && url.pathname === '/client-session') {
       const token = presentedKey(req);
@@ -1266,6 +1290,7 @@ const server = http.createServer(async (req, res) => {
         return json(res, 200, {
           wallet: wallet ? { currency: wallet.currency, balance: wallet.balance, credits: wallet.credits, consumed: wallet.consumed, requests: wallet.requests, negative: wallet.negative } : null,
           presets: TOPUP_PRESETS, min: MIN_TOPUP, max: MAX_TOPUP, currency: 'USD',
+          checkout: { provider: 'payssion', enabled: !!payssionConfig() },
           requests: topupRequests.filter(item => item.keyId === root).sort((a, b) => b.createdAt.localeCompare(a.createdAt)).slice(0, 20).map(clientTopupRequest),
           statement, byModel: spendByModel(clientStatement(ledger, familyKeys, 200)),
         });
@@ -1279,6 +1304,17 @@ const server = http.createServer(async (req, res) => {
         const item = { id: randomUUID(), keyId: root, requestedBy: key.id, amount: checked.amount, currency: checked.currency, status: 'pending', createdAt: now, decidedAt: null, reason: null, topupId: null };
         await mutate(async () => { const next = [...topupRequests, item]; await store.save('topup-requests', next); topupRequests = next; });
         return json(res, 201, { request: clientTopupRequest(item) });
+      }
+      // Pagamento online do pedido: devolve o formulário assinado da página hospedada da Payssion.
+      const checkoutMatch = /^\/me\/topup-requests\/([\w-]{1,80})\/checkout$/.exec(url.pathname);
+      if (req.method === 'POST' && checkoutMatch) {
+        const config = payssionConfig();
+        if (!config) return json(res, 404, { error: 'Pagamento online ainda não está disponível. Aguarde as instruções da equipe.' });
+        const request = topupRequests.find(item => item.id === checkoutMatch[1] && item.keyId === root);
+        if (!request) return json(res, 404, { error: 'Pedido não encontrado.' });
+        if (request.status !== 'pending') return json(res, 409, { error: 'Este pedido já foi decidido.' });
+        const site = (process.env.ANUBIS_SITE_URL || 'https://anubisrouter.com').replace(/\/+$/, '');
+        return json(res, 200, payssionCheckout(config, request, { returnUrl: `${site}/minha-conta?pagamento=retorno` }));
       }
       if (req.method === 'GET' && url.pathname === '/me/stats') {
         const period = periodFrom(url);
