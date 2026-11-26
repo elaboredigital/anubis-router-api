@@ -100,6 +100,25 @@ const BASELINE = {
     evidence: ['docs/31-duck-ai-analise.md'],
     restriction: 'Sem API comercial identificada; termos restringem consultas automatizadas e serviços de IA.',
   },
+  // Fornecedores em avaliação (2026-11-26): cadastro preparado, nada mapeado ainda.
+  teamorouter: {
+    protocols: [], modalities: [], billingUnits: [], quotaSources: [],
+    variantPolicy: 'modelos efetivos e IDs ainda não mapeados',
+    evidence: ['docs/26-fornecedores-planejados.md'],
+    restriction: 'Em avaliação: mapear endpoint, catálogo, preços e direitos de revenda antes de conectar.',
+  },
+  zerouter: {
+    protocols: [], modalities: [], billingUnits: [], quotaSources: [],
+    variantPolicy: 'modelos efetivos e IDs ainda não mapeados',
+    evidence: ['docs/26-fornecedores-planejados.md'],
+    restriction: 'Em avaliação: mapear endpoint, catálogo, preços e direitos de revenda antes de conectar.',
+  },
+  xiu: {
+    protocols: [], modalities: [], billingUnits: [], quotaSources: [],
+    variantPolicy: 'modelos efetivos e IDs ainda não mapeados',
+    evidence: ['docs/26-fornecedores-planejados.md'],
+    restriction: 'Em avaliação: mapear endpoint, catálogo, preços e direitos de revenda antes de conectar.',
+  },
   generic: {
     protocols: ['openai-chat'],
     modalities: ['chat'],
@@ -118,6 +137,9 @@ export const CONNECTION_BLOCKED = {
   a2e: 'Integração desabilitada: exige adaptador assíncrono e direitos de mídia.',
   cosmospro: 'Integração desabilitada: revenda de chave comum é proibida fora do programa oficial.',
   hcnsec: 'Integração desabilitada: endpoint, autenticação e condições do pacote não homologados.',
+  teamorouter: 'Em avaliação: fornecedor ainda não mapeado nem escolhido.',
+  zerouter: 'Em avaliação: fornecedor ainda não mapeado nem escolhido.',
+  xiu: 'Em avaliação: fornecedor ainda não mapeado nem escolhido.',
 };
 
 export const DEFAULT_READINESS_POLICY = {

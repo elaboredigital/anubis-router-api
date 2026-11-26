@@ -11,6 +11,10 @@ export const connectors = [
   { id: 'a2e', name: 'A2E', base: 'https://api.a2e.ai', note: 'API de mídia assíncrona; adaptador e validação pendentes.', site: 'https://a2e.ai/pricing/', docs: 'https://video.a2e.ai/dev' },
   { id: 'cosmospro', name: 'CosmosPro', note: 'Endpoint e condições de revenda ainda não confirmados.', site: 'https://cosmospro.dev/', docs: null },
   { id: 'arena', name: 'Arena.ai', base: 'https://api.arena.ai', note: 'Condições de uso e revenda precisam de autorização; integração desabilitada.', site: 'https://arena.ai/', docs: 'https://platform.arena.ai/docs/api' },
+  // Em avaliação desde 2026-11-26: só cadastro; endpoint, preços, catálogo e condições de revenda ainda não mapeados.
+  { id: 'teamorouter', name: 'TeamoRouter', note: 'Fornecedor em avaliação; endpoint, preços e condições ainda não mapeados.', site: 'https://teamorouter.com/', docs: null },
+  { id: 'zerouter', name: 'ZeRouter', note: 'Fornecedor em avaliação; endpoint, preços e condições ainda não mapeados.', site: 'https://www.zerouter.ai/', docs: null },
+  { id: 'xiu', name: 'Xiu AI', note: 'Fornecedor em avaliação; endpoint, preços e condições ainda não mapeados.', site: 'https://xiu.ai/pricing', docs: null },
   { id: 'duck', name: 'Duck.ai', note: 'API de revenda não identificada; integração desabilitada.', site: 'https://duck.ai/', docs: 'https://duckduckgo.com/duckduckgo-help-pages/duckai' },
   { id: 'generic', name: 'OpenAI compatível (genérico)', note: 'Informe base HTTPS e confirme autenticação e direitos de uso.' },
 ];
