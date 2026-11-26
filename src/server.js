@@ -26,7 +26,7 @@ import { buildGlobalStats } from './global-stats.js';
 import { buildModelAnalytics } from './model-analytics.js';
 import { buildReadiness, normalizeReadinessUpdate, validateReadinessUpdate, commercialBlock, CONNECTION_BLOCKED, DEFAULT_READINESS_POLICY } from './provider-readiness.js';
 import { MAXROUTER_PRICING_PAGE, MAXROUTER_PRICING_URL, parseMaxRouterPrices } from './maxrouter-pricing.js';
-import { buildPublicCatalog } from './public-catalog.js';
+import { buildPublicCatalog, modelPricing } from './public-catalog.js';
 import { makeReferralCode, safeText, normalizeReferral, validateRegister, validateQualify, applyQualify, validateStatus, applyStatus, buildClientReferralReport, buildAdminReferralReport, validateMoveCredit } from './referrals.js';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -140,6 +140,9 @@ let referralAudit = await store.load('referral-audit', []);
 if (!Array.isArray(referralAudit)) throw new Error('Auditoria de indicações inválida');
 let referralCodes = await store.load('referral-codes', {});
 if (!referralCodes || typeof referralCodes !== 'object' || Array.isArray(referralCodes)) referralCodes = {};
+// Preço original (tabela do fabricante) por ID público: só exibição e comparação, nunca entra na cobrança.
+let originalPrices = await store.load('model-original-prices', {});
+if (!originalPrices || typeof originalPrices !== 'object' || Array.isArray(originalPrices)) originalPrices = {};
 let priceHistory = await store.load('price-history', null);
 if (!Array.isArray(priceHistory)) {
   // Instalações anteriores não tinham histórico: fixa o que estava vigente como linha de base.
@@ -207,9 +210,21 @@ async function appendPriceVersion(version) {
   priceHistory.push({ id: randomUUID(), effectiveAt: new Date().toISOString(), ...version });
   await store.save('price-history', priceHistory);
 }
-function saleSnapshotFor(startedAt, provider, model, plan) {
-  const resolved = resolvePrices(priceHistory, startedAt || new Date().toISOString(), provider, model, plan?.id || null);
-  return { multiplier: resolved.multiplier, manualPrice: resolved.manualPrice, versionIds: resolved.versionIds };
+/** Média de custo dos fornecedores ativos de um ID público e a rota cuja regra de preço vale para ele. */
+function referenceFor(publicModel) {
+  if (!publicModel) return null;
+  return modelPricing({ routes: routes.filter(r => r.id === publicModel), connectionForRoute, resolve: () => ({}) })[0] || null;
+}
+function saleSnapshotFor(startedAt, provider, model, plan, publicModel = null) {
+  // A venda é a mesma qualquer que seja o fornecedor usado: média de custo × regra do fornecedor de maior prioridade.
+  const reference = referenceFor(publicModel);
+  const ruleProvider = reference ? connectionForRoute(reference.route)?.provider || provider : provider;
+  const ruleModel = reference ? reference.route.upstreamModel : model;
+  const resolved = resolvePrices(priceHistory, startedAt || new Date().toISOString(), ruleProvider, ruleModel, plan?.id || null);
+  return {
+    multiplier: resolved.multiplier, manualPrice: resolved.manualPrice, versionIds: resolved.versionIds,
+    referenceCost: reference?.referenceCost || null,
+  };
 }
 async function recordLedgerCompletion(record) {
   const entry = buildLedgerEntry(record, record?.planId || null);
@@ -558,6 +573,48 @@ const server = http.createServer(async (req, res) => {
         return json(res, 200, report);
       }
       if (req.method === 'GET' && url.pathname === '/admin/pricing') return json(res, 200, pricingConfig);
+      // Os três preços de cada modelo público: original (fabricante), custo por fornecedor e média, e venda ao cliente.
+      if (req.method === 'GET' && url.pathname === '/admin/model-prices') {
+        const at = new Date().toISOString();
+        const items = modelPricing({ routes, connectionForRoute, originals: originalPrices, resolve: (provider, model) => resolvePrices(priceHistory, at, provider, model, null) });
+        return json(res, 200, {
+          targetSuppliers: 3, defaultMultiplier: pricingConfig.defaultMultiplier,
+          models: items.map(item => ({
+            id: item.id, name: item.route.name || item.providerModel?.name || item.id,
+            suppliers: item.suppliers, supplierCount: item.suppliers.length,
+            pricedSuppliers: item.referenceCost?.suppliers || 0,
+            averageCost: item.referenceCost, multiplier: item.resolved.manualPrice ? null : item.resolved.multiplier || pricingConfig.defaultMultiplier,
+            manual: !!item.resolved.manualPrice, sale: item.sale, original: item.original,
+          })),
+        });
+      }
+      if (req.method === 'POST' && url.pathname === '/admin/model-prices') {
+        if (!/^application\/json\b/i.test(req.headers['content-type'] || '')) return json(res, 415, { error: 'Use application/json' });
+        const data = await body(req);
+        if (typeof data.model !== 'string' || !/^[\w./:-]{1,160}$/.test(data.model)) return json(res, 400, { error: 'Modelo inválido.' });
+        let saved = null;
+        if (data.price !== null) {
+          const price = data.price;
+          if (!price || typeof price !== 'object' || !/^[A-Z]{3}$/.test(price.currency || 'USD')) return json(res, 400, { error: 'Moeda inválida.' });
+          saved = { currency: price.currency || 'USD' };
+          for (const field of ['request', 'input', 'output', 'cacheRead', 'cacheWrite']) {
+            const value = price[field];
+            if (value === undefined || value === null || value === '') continue;
+            if (decimalUnits(String(value)) === null) return json(res, 400, { error: 'Informe valores não negativos.' });
+            saved[field] = String(value);
+          }
+          if (Object.keys(saved).length === 1) return json(res, 400, { error: 'Informe ao menos um preço.' });
+          saved.updatedAt = new Date().toISOString();
+        }
+        await mutate(async () => {
+          const next = { ...originalPrices };
+          if (saved) next[data.model] = saved; else delete next[data.model];
+          await store.save('model-original-prices', next);
+          originalPrices = next;
+          publicCatalogCache = null;
+        });
+        return json(res, 200, { model: data.model, original: saved });
+      }
       if (req.method === 'POST' && url.pathname === '/admin/pricing') {
         if (!/^application\/json\b/i.test(req.headers['content-type'] || '')) return json(res, 415, { error: 'Use application/json' });
         const data = await body(req);
@@ -596,6 +653,7 @@ const server = http.createServer(async (req, res) => {
             await appendPriceVersion({ scope: 'manual', provider: data.provider, model: data.model, price: savedPrice });
           });
         } else return json(res, 400, { error: 'Escopo de preço inválido.' });
+        publicCatalogCache = null;
         return json(res, 200, pricingConfig);
       }
       if (req.method === 'GET' && url.pathname === '/admin/plans') return json(res, 200, { plans, defaultMultiplier: pricingConfig.defaultMultiplier, providerUsage: providerQuotaUsage(await usageStore.list()) });
@@ -1168,7 +1226,7 @@ const server = http.createServer(async (req, res) => {
       const now = Date.now();
       if (!publicCatalogCache || now - publicCatalogCache.at > 60_000) {
         const records = await usageStore.list();
-        const data = buildPublicCatalog({ routes, connectionForRoute, records, now, resolve: (provider, model) => resolvePrices(priceHistory, new Date(now).toISOString(), provider, model, null) });
+        const data = buildPublicCatalog({ routes, connectionForRoute, records, now, originals: originalPrices, resolve: (provider, model) => resolvePrices(priceHistory, new Date(now).toISOString(), provider, model, null) });
         publicCatalogCache = { at: now, data };
       }
       return json(res, 200, { object: 'list', updatedAt: new Date(publicCatalogCache.at).toISOString(), data: publicCatalogCache.data });
@@ -1223,7 +1281,7 @@ const server = http.createServer(async (req, res) => {
         const costSnapshot = priceSnapshot(providerModel, connection.provider);
         const startedAt = new Date().toISOString();
         // Preço fixado antes da chamada: alterações posteriores não mudam este lançamento.
-        const saleSnapshot = saleSnapshotFor(startedAt, connection.provider, route.upstreamModel, clientPlan);
+        const saleSnapshot = saleSnapshotFor(startedAt, connection.provider, route.upstreamModel, clientPlan, route.id);
         if (paygWallet) {
           const check = checkWalletBalance(paygWallet, quoteSale(costSnapshot, saleSnapshot, {}));
           if (!check.allowed) {

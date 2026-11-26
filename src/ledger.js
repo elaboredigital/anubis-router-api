@@ -45,7 +45,11 @@ export function quoteSale(costSnapshot, saleSnapshot = {}, usage = {}) {
   const manualUnits = manualPrice ? manualSaleUnits(manualPrice, pseudo) : null;
   const multiplier = manualUnits === null ? (saleSnapshot?.multiplier || null) : null;
   const multiplierUnits = multiplier ? decimalUnits(String(multiplier)) : null;
-  const units = manualUnits !== null ? manualUnits : (multiplierUnits === null ? null : cost.units * multiplierUnits / SCALE);
+  // Venda sobre o custo médio entre os fornecedores do modelo, fixado no início da chamada;
+  // registros antigos, sem essa referência, continuam sobre o custo da rota usada.
+  const reference = saleSnapshot?.referenceCost ? recordCost({ status: 'completed', usage, costSnapshot: saleSnapshot.referenceCost }) : null;
+  const base = reference && reference.currency === cost.currency ? reference.units : cost.units;
+  const units = manualUnits !== null ? manualUnits : (multiplierUnits === null ? null : base * multiplierUnits / SCALE);
   return {
     currency: manualPrice?.currency || cost.currency, costCurrency: cost.currency, costUnits: cost.units,
     units, multiplier, manual: !!manualPrice,

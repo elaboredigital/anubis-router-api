@@ -87,34 +87,111 @@ export function uptimeFor(records, model, now = Date.now()) {
   };
 }
 
+const PRICE_FIELDS = ['request', 'input', 'output', 'cacheRead', 'cacheWrite'];
+
+/** Custo cobrado pelo fornecedor nesta rota, ou null quando a conexão não publica preço. */
+export function routeCost(connection, route) {
+  const providerModel = connection?.models?.find(m => m.id === route.upstreamModel) || null;
+  const pricing = providerModel?.pricing || null;
+  if (!pricing) return null;
+  return {
+    billingType: providerModel.billingType === 'request' ? 'request' : 'token', currency: pricing.currency || 'USD',
+    request: pricing.request ?? null, input: pricing.input ?? null, output: pricing.output ?? null,
+    cacheRead: pricing.cacheRead ?? pricing.cache_read ?? null, cacheWrite: pricing.cacheWrite ?? pricing.cache_write ?? null,
+    planOnly: !!providerModel.planOnly,
+  };
+}
+
 /**
- * Lista pública: um item por ID público habilitado, com preço da rota de maior prioridade.
- * `resolve(provider, upstreamModel)` devolve { multiplier, manualPrice } vigentes.
+ * Custo de referência do modelo: média, campo a campo, entre os fornecedores que cobram na mesma unidade e moeda.
+ * Prevalece o grupo com mais fornecedores; no empate, o do fornecedor de maior prioridade (primeiro da lista).
  */
-export function buildPublicCatalog({ routes, connectionForRoute, resolve, records = [], now = Date.now() }) {
+export function averageCost(costs) {
+  const groups = new Map();
+  for (const cost of costs) {
+    if (!cost) continue;
+    const key = `${cost.billingType}\u0000${cost.currency}`;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(cost);
+  }
+  let chosen = null;
+  for (const group of groups.values()) if (!chosen || group.length > chosen.length) chosen = group;
+  if (!chosen) return null;
+  const average = { billingType: chosen[0].billingType, currency: chosen[0].currency, suppliers: chosen.length };
+  for (const field of PRICE_FIELDS) {
+    const values = chosen.map(cost => decimalUnits(cost[field] === null || cost[field] === undefined ? null : String(cost[field]))).filter(units => units !== null);
+    average[field] = values.length ? formatUnits(values.reduce((sum, units) => sum + units, 0n) / BigInt(values.length)) : null;
+  }
+  return average;
+}
+
+/** Desconto inteiro sobre o preço original, só quando a venda é menor. */
+function discount(original, sale) {
+  const before = Number(original); const after = Number(sale);
+  if (!Number.isFinite(before) || !Number.isFinite(after) || before <= 0 || after >= before) return null;
+  return Math.round((1 - after / before) * 100);
+}
+
+/**
+ * Preço de cada ID público: fornecedores ativos, custo médio, regra vigente e preço de venda.
+ * A regra (multiplicador ou preço manual) é a do fornecedor de maior prioridade.
+ * `resolve(provider, upstreamModel)` devolve { multiplier, manualPrice, versionIds }.
+ */
+export function modelPricing({ routes, connectionForRoute, resolve, originals = {} }) {
   const byId = new Map();
   const ordered = routes.filter(r => r.enabled && connectionForRoute(r))
     .sort((a, b) => (a.priority ?? 100) - (b.priority ?? 100));
   for (const route of ordered) {
-    if (byId.has(route.id)) continue;
     const connection = connectionForRoute(route);
-    const providerModel = connection.models?.find(m => m.id === route.upstreamModel) || null;
-    const pricing = providerModel?.pricing || null;
-    const cost = pricing ? {
-      billingType: providerModel.billingType, currency: pricing.currency || 'USD',
-      request: pricing.request ?? null, input: pricing.input ?? null, output: pricing.output ?? null,
-      cacheRead: pricing.cacheRead ?? pricing.cache_read ?? null, cacheWrite: pricing.cacheWrite ?? pricing.cache_write ?? null,
-    } : null;
-    const name = route.name || providerModel?.name || route.id;
-    byId.set(route.id, {
-      id: route.id, name,
-      family: modelFamily(route.id, name),
-      planOnly: !!providerModel?.planOnly,
-      context: providerModel?.context || null,
-      price: salePrice(cost, resolve(connection.provider, route.upstreamModel)),
-      createdAt: route.createdAt || null,
-      ...uptimeFor(records, route.id, now),
+    if (!byId.has(route.id)) byId.set(route.id, { id: route.id, route, connection, suppliers: [] });
+    byId.get(route.id).suppliers.push({
+      connectionId: connection.id || null, connectionName: connection.name || connection.provider, provider: connection.provider,
+      upstreamModel: route.upstreamModel, priority: route.priority ?? 100, cost: routeCost(connection, route),
     });
   }
-  return [...byId.values()];
+  return [...byId.values()].map(item => {
+    const { route, connection } = item;
+    const providerModel = connection.models?.find(m => m.id === route.upstreamModel) || null;
+    const reference = averageCost(item.suppliers.map(s => s.cost));
+    const resolved = resolve(connection.provider, route.upstreamModel) || {};
+    return {
+      id: item.id, route, providerModel, suppliers: item.suppliers, referenceCost: reference, resolved,
+      sale: salePrice(reference, resolved), original: originals[item.id] || null,
+    };
+  });
+}
+
+/** Preço original público com o desconto de cada campo em relação à venda. */
+function publicOriginal(original, sale) {
+  if (!original || !sale) return null;
+  const out = { currency: original.currency || 'USD' };
+  let any = false;
+  for (const field of PRICE_FIELDS) {
+    const value = original[field];
+    out[field] = value === undefined || value === '' ? null : value;
+    if (out[field] !== null) any = true;
+  }
+  if (!any) return null;
+  out.discount = Object.fromEntries(PRICE_FIELDS.map(field => [field, out[field] === null || sale[field] === null ? null : discount(out[field], sale[field])]));
+  return out;
+}
+
+/**
+ * Lista pública: um item por ID público habilitado, com preço de venda (média de custo × multiplicador)
+ * e preço original do fabricante quando cadastrado. Nunca expõe custo, fornecedor ou conexão.
+ */
+export function buildPublicCatalog({ routes, connectionForRoute, resolve, originals = {}, records = [], now = Date.now() }) {
+  return modelPricing({ routes, connectionForRoute, resolve, originals }).map(item => {
+    const name = item.route.name || item.providerModel?.name || item.id;
+    return {
+      id: item.id, name,
+      family: modelFamily(item.id, name),
+      planOnly: !!item.providerModel?.planOnly,
+      context: item.providerModel?.context || null,
+      price: item.sale,
+      originalPrice: publicOriginal(item.original, item.sale),
+      createdAt: item.route.createdAt || null,
+      ...uptimeFor(records, item.id, now),
+    };
+  });
 }

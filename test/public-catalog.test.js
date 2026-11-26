@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { buildPublicCatalog, salePrice, uptimeFor, modelFamily } from '../src/public-catalog.js';
+import { buildPublicCatalog, salePrice, uptimeFor, modelFamily, modelPricing, averageCost } from '../src/public-catalog.js';
 
 const now = Date.parse('2026-11-25T12:30:00Z');
 const connection = { provider: 'wusrouter', models: [
@@ -53,4 +53,47 @@ test('família deduzida do nome', () => {
   assert.equal(modelFamily('jailbreak/claude-fable-5'), 'anthropic');
   assert.equal(modelFamily('glm-5'), 'zai');
   assert.equal(modelFamily('kimi-k3'), 'moonshot');
+});
+
+test('venda usa a média de custo entre os fornecedores × multiplicador', () => {
+  const a = { id: 'a', provider: 'p1', models: [{ id: 'm', billingType: 'token', pricing: { currency: 'USD', input: '1', output: '4' } }] };
+  const b = { id: 'b', provider: 'p2', models: [{ id: 'm', billingType: 'token', pricing: { currency: 'USD', input: '2', output: '6', cacheRead: '0.2' } }] };
+  const c = { id: 'c', provider: 'p3', models: [{ id: 'm', billingType: 'token', pricing: { currency: 'USD', input: '3', output: '8' } }] };
+  const byConnection = { a, b, c };
+  const three = [
+    { id: 'modelo', upstreamModel: 'm', connectionId: 'a', enabled: true, priority: 1 },
+    { id: 'modelo', upstreamModel: 'm', connectionId: 'b', enabled: true, priority: 2 },
+    { id: 'modelo', upstreamModel: 'm', connectionId: 'c', enabled: true, priority: 3 },
+    { id: 'modelo', upstreamModel: 'm', connectionId: 'c', enabled: false, priority: 4 },
+  ];
+  const [item] = modelPricing({ routes: three, connectionForRoute: r => byConnection[r.connectionId], resolve: () => ({ multiplier: '5' }) });
+  assert.equal(item.suppliers.length, 3);
+  assert.equal(item.referenceCost.suppliers, 3);
+  assert.equal(item.referenceCost.input, '2');
+  assert.equal(item.referenceCost.output, '6');
+  assert.equal(item.referenceCost.cacheRead, '0.2', 'campo informado por um só fornecedor usa só esse valor');
+  assert.equal(item.sale.input, '10');
+  assert.equal(item.sale.output, '30');
+  const [single] = modelPricing({ routes: three.slice(0, 1), connectionForRoute: r => byConnection[r.connectionId], resolve: () => ({ multiplier: '5' }) });
+  assert.equal(single.sale.input, '5');
+});
+
+test('média ignora fornecedor em outra unidade quando há maioria', () => {
+  const avg = averageCost([
+    { billingType: 'token', currency: 'USD', input: '1', output: '1' },
+    { billingType: 'request', currency: 'USD', request: '0.5' },
+    { billingType: 'token', currency: 'USD', input: '3', output: '5' },
+  ]);
+  assert.equal(avg.billingType, 'token');
+  assert.equal(avg.suppliers, 2);
+  assert.equal(avg.input, '2');
+  assert.equal(averageCost([null]), null);
+});
+
+test('catálogo público mostra preço original e desconto sem expor custo', () => {
+  const [item] = buildPublicCatalog({ routes: routes.slice(0, 1), connectionForRoute: () => connection, resolve: () => ({ multiplier: '5' }), originals: { 'claude-opus': { currency: 'USD', input: '15', output: '75' } }, now });
+  assert.equal(item.originalPrice.input, '15');
+  assert.equal(item.originalPrice.discount.input, 67);
+  assert.equal(item.originalPrice.discount.output, 87);
+  assert.equal(item.originalPrice.discount.cacheRead, null);
 });

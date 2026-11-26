@@ -118,3 +118,13 @@ test('summarizeLedger separa moedas e conta pendências sem inventar valor', () 
   assert.equal(summary.byPlan.find(item => item.name === 'plano-2' && item.currency === 'BRL').sale, '0.5');
   assert.equal(summary.byKey.find(item => item.name === 'k1' && item.currency === 'USD').cost, '0.002');
 });
+
+test('venda usa o custo médio fixado e mantém o custo real da rota usada', () => {
+  const quote = quoteSale(
+    { billingType: 'token', currency: 'USD', input: '1', output: '1' },
+    { multiplier: '5', referenceCost: { billingType: 'token', currency: 'USD', input: '2', output: '2' } },
+    { inputTokens: 1_000_000, outputTokens: 0 },
+  );
+  assert.equal(quote.costUnits, 1_000_000_000_000n);
+  assert.equal(quote.units, 10_000_000_000_000n);
+});
