@@ -27,7 +27,7 @@ import { buildModelAnalytics } from './model-analytics.js';
 import { buildReadiness, normalizeReadinessUpdate, validateReadinessUpdate, commercialBlock, CONNECTION_BLOCKED, DEFAULT_READINESS_POLICY } from './provider-readiness.js';
 import { MAXROUTER_PRICING_PAGE, MAXROUTER_PRICING_URL, parseMaxRouterPrices } from './maxrouter-pricing.js';
 import { buildPublicCatalog, modelPricing } from './public-catalog.js';
-import { CREDIT_PLAN, TOPUP_PRESETS, MIN_TOPUP, MAX_TOPUP, ensureCreditPlan, validateTopupRequest, clientTopupRequest, clientStatement, spendByModel } from './credits.js';
+import { CREDIT_PLAN, TOPUP_PRESETS, MIN_TOPUP, MAX_TOPUP, ensureCreditPlan, validateTopupRequest, clientTopupRequest, clientStatement, spendByModel, verifyPaymentSignature, validatePaymentConfirmation } from './credits.js';
 import { makeReferralCode, safeText, normalizeReferral, validateRegister, validateQualify, applyQualify, validateStatus, applyStatus, buildClientReferralReport, buildAdminReferralReport, validateMoveCredit } from './referrals.js';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -235,6 +235,38 @@ async function recordLedgerCompletion(record) {
   const entry = buildLedgerEntry(record, record?.planId || null);
   if (!entry) return;
   await mutate(async () => { ledger = upsertLedgerEntry(ledger, entry); await store.save('ledger', ledger); });
+}
+/**
+ * Decide um pedido de recarga. Aprovar cria a recarga uma única vez (idempotencyKey) e coloca no plano de créditos
+ * as chaves da conta que estavam sem plano. Usado pelo admin e pela confirmação de pagamento assinada.
+ */
+async function decideTopupRequest(id, action, note = '', payment = null) {
+  let result = null; let failure = null;
+  await mutate(async () => {
+    const current = topupRequests.find(item => item.id === id);
+    if (!current) { failure = [404, 'Pedido não encontrado.']; return; }
+    if (current.status !== 'pending') { failure = [409, 'Este pedido já foi decidido.']; result = current; return; }
+    const decidedAt = new Date().toISOString();
+    let updated;
+    if (action === 'approve') {
+      const owner = clientKeys.find(key => key.id === current.keyId);
+      if (!owner || owner.active === false) { failure = [400, 'A conta deste pedido está revogada.']; return; }
+      const topup = { id: randomUUID(), keyId: current.keyId, amount: current.amount, currency: current.currency, note: note || 'Recarga solicitada pelo cliente', idempotencyKey: `request-${current.id}`, planId: owner.planId || null, createdAt: decidedAt, requestId: current.id, payment };
+      const nextTopups = [...topups, topup]; await store.save('topups', nextTopups); topups = nextTopups;
+      // Quem compra crédito passa a ser cobrado pelo saldo: chaves da conta sem plano entram no plano de créditos.
+      if (clientKeys.some(key => (key.id === owner.id || key.parentId === owner.id) && !key.planId)) {
+        const nextKeys = clientKeys.map(key => (key.id === owner.id || key.parentId === owner.id) && !key.planId ? { ...key, planId: CREDIT_PLAN.id } : key);
+        await store.save('api-keys', nextKeys); clientKeys = nextKeys;
+      }
+      updated = { ...current, status: 'approved', decidedAt, topupId: topup.id, note: note || null, payment };
+    } else {
+      updated = { ...current, status: 'rejected', decidedAt, reason: note || 'Pagamento não confirmado.' };
+    }
+    const next = topupRequests.map(item => item.id === current.id ? updated : item);
+    await store.save('topup-requests', next); topupRequests = next; result = updated;
+  });
+  const wallet = result ? buildWallets(clientKeys, plans, topups, ledger).find(item => item.keyId === result.keyId) || null : null;
+  return { failure, request: result, wallet };
 }
 function routeAuditEvent(action, target, before, after, detail = null) {
   return { id: randomUUID(), ...buildRouteAudit(action, target, before, after, detail) };
@@ -727,33 +759,9 @@ const server = http.createServer(async (req, res) => {
       if (req.method === 'POST' && topupDecision) {
         const data = /^application\/json\b/i.test(req.headers['content-type'] || '') ? await body(req) : {};
         const note = typeof data.note === 'string' ? data.note.trim().slice(0, 160) : '';
-        let result = null; let failure = null;
-        await mutate(async () => {
-          const current = topupRequests.find(item => item.id === topupDecision[1]);
-          if (!current) { failure = [404, 'Pedido não encontrado.']; return; }
-          if (current.status !== 'pending') { failure = [409, 'Este pedido já foi decidido.']; return; }
-          const decidedAt = new Date().toISOString();
-          let updated;
-          if (topupDecision[2] === 'approve') {
-            const owner = clientKeys.find(key => key.id === current.keyId);
-            if (!owner || owner.active === false) { failure = [400, 'A conta deste pedido está revogada.']; return; }
-            const topup = { id: randomUUID(), keyId: current.keyId, amount: current.amount, currency: current.currency, note: note || `Recarga solicitada pelo cliente`, idempotencyKey: `request-${current.id}`, planId: owner.planId || null, createdAt: decidedAt, requestId: current.id };
-            const nextTopups = [...topups, topup]; await store.save('topups', nextTopups); topups = nextTopups;
-            // Quem compra crédito passa a ser cobrado pelo saldo: chaves da conta sem plano entram no plano de créditos.
-            if (clientKeys.some(key => (key.id === owner.id || key.parentId === owner.id) && !key.planId)) {
-              const nextKeys = clientKeys.map(key => (key.id === owner.id || key.parentId === owner.id) && !key.planId ? { ...key, planId: CREDIT_PLAN.id } : key);
-              await store.save('api-keys', nextKeys); clientKeys = nextKeys;
-            }
-            updated = { ...current, status: 'approved', decidedAt, topupId: topup.id, note: note || null };
-          } else {
-            updated = { ...current, status: 'rejected', decidedAt, reason: note || 'Pagamento não confirmado.' };
-          }
-          const next = topupRequests.map(item => item.id === current.id ? updated : item);
-          await store.save('topup-requests', next); topupRequests = next; result = updated;
-        });
-        if (failure) return json(res, failure[0], { error: failure[1] });
-        const wallet = buildWallets(clientKeys, plans, topups, ledger).find(item => item.keyId === result.keyId) || null;
-        return json(res, 200, { request: result, wallet });
+        const outcome = await decideTopupRequest(topupDecision[1], topupDecision[2], note);
+        if (outcome.failure) return json(res, outcome.failure[0], { error: outcome.failure[1] });
+        return json(res, 200, { request: outcome.request, wallet: outcome.wallet });
       }
       // Indicações: apenas registro administrativo. Nenhum depósito é cobrado e nenhum crédito é pago.
       if (req.method === 'GET' && url.pathname === '/admin/referrals') {
@@ -1207,6 +1215,30 @@ const server = http.createServer(async (req, res) => {
         return json(res, 200, { route: clean });
       }
       return json(res, 404, { error: 'Rota não encontrada' });
+    }
+    // Confirmação de pagamento assinada por um gateway ou automação: aprova o pedido de recarga correspondente.
+    if (req.method === 'POST' && url.pathname === '/payments/confirm') {
+      const secret = process.env.ANUBIS_PAYMENT_WEBHOOK_SECRET || '';
+      if (secret.length < 32) return json(res, 404, { error: 'Rota não encontrada' });
+      const chunks = []; let size = 0;
+      for await (const chunk of req) { size += chunk.length; if (size > 64 * 1024) return json(res, 413, { error: 'Corpo muito grande.' }); chunks.push(chunk); }
+      const raw = Buffer.concat(chunks).toString('utf8');
+      const invalid = verifyPaymentSignature({ secret, timestamp: req.headers['x-anubis-timestamp'], signature: req.headers['x-anubis-signature'], raw });
+      if (invalid) return json(res, 401, { error: invalid });
+      let data; try { data = JSON.parse(raw); } catch { return json(res, 400, { error: 'JSON inválido.' }); }
+      const request = typeof data?.requestId === 'string' ? topupRequests.find(item => item.id === data.requestId) : null;
+      const mismatch = validatePaymentConfirmation(data, request);
+      if (mismatch) return json(res, request || !data?.requestId ? 400 : 404, { error: mismatch });
+      // Reenvio do mesmo pagamento é aceito sem creditar de novo; outra referência para pedido já pago é conflito.
+      if (request.status === 'approved') {
+        const same = request.payment?.reference === data.reference;
+        return json(res, same ? 200 : 409, same ? { request: clientTopupRequest(request), duplicate: true } : { error: 'Pedido já creditado por outro pagamento.' });
+      }
+      if (topupRequests.some(item => item.payment?.reference === data.reference)) return json(res, 409, { error: 'Referência de pagamento já usada em outro pedido.' });
+      const payment = { reference: data.reference, provider: typeof data.provider === 'string' ? data.provider.slice(0, 40) : null, confirmedAt: new Date().toISOString() };
+      const outcome = await decideTopupRequest(request.id, 'approve', `Pagamento confirmado automaticamente (${payment.reference})`, payment);
+      if (outcome.failure) return json(res, outcome.failure[0], { error: outcome.failure[1] });
+      return json(res, 200, { request: clientTopupRequest(outcome.request), duplicate: false });
     }
     // Revogação da sessão escolhida no painel, feita pelo próprio portador do token (sem chave administrativa).
     if (req.method === 'DELETE' && url.pathname === '/client-session') {

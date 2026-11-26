@@ -1,6 +1,7 @@
 // Créditos pré-pagos do cliente: o cliente pede uma recarga ($5, $10 ou mais), o admin confirma o pagamento
 // e o valor vira uma recarga na carteira da conta. Cada chamada concluída desconta o preço de venda do modelo.
 // Não há checkout aqui: a confirmação do pagamento é feita por uma pessoa no admin.
+import { createHmac, timingSafeEqual } from 'node:crypto';
 import { decimalUnits, formatUnits } from './dashboard.js';
 
 export const CREDIT_PLAN = Object.freeze({
@@ -72,3 +73,30 @@ export function spendByModel(statement) {
     .map(item => ({ model: item.model, currency: item.currency, amount: formatUnits(item.units), requests: item.requests }));
 }
 
+
+// Confirmação automática de pagamento: um gateway ou automação (ex.: n8n lendo o aviso de PIX) chama
+// POST /payments/confirm com corpo JSON assinado: HMAC-SHA256(segredo, `${timestamp}.${corpo}`) em hex,
+// nos cabeçalhos x-anubis-timestamp (ms) e x-anubis-signature. Sem ANUBIS_PAYMENT_WEBHOOK_SECRET, fica desligada.
+export const PAYMENT_TOLERANCE_MS = 5 * 60_000;
+export function paymentSignature(secret, timestamp, raw) {
+  return createHmac('sha256', secret).update(`${timestamp}.${raw}`).digest('hex');
+}
+export function verifyPaymentSignature({ secret, timestamp, signature, raw, now = Date.now() }) {
+  if (!secret || secret.length < 32) return 'Confirmação de pagamento desligada.';
+  const at = Number(timestamp);
+  if (!Number.isSafeInteger(at) || Math.abs(now - at) > PAYMENT_TOLERANCE_MS) return 'Carimbo de tempo ausente ou fora da janela de 5 minutos.';
+  if (typeof signature !== 'string' || !/^[a-f0-9]{64}$/.test(signature)) return 'Assinatura inválida.';
+  const expected = Buffer.from(paymentSignature(secret, timestamp, raw), 'hex');
+  const given = Buffer.from(signature, 'hex');
+  return expected.length === given.length && timingSafeEqual(expected, given) ? null : 'Assinatura inválida.';
+}
+/** O pagamento precisa bater com o pedido: mesmo valor e moeda, com uma referência do pagamento. */
+export function validatePaymentConfirmation(data, request) {
+  if (!data || typeof data !== 'object') return 'Corpo inválido.';
+  if (typeof data.reference !== 'string' || !/^[\w.:/-]{1,120}$/.test(data.reference)) return 'Informe a referência do pagamento.';
+  if (!request) return 'Pedido não encontrado.';
+  const paid = decimalUnits(typeof data.amount === 'number' ? String(data.amount) : data.amount);
+  if (paid === null || paid !== decimalUnits(request.amount)) return `Valor pago difere do pedido (US$ ${request.amount}).`;
+  if ((data.currency || 'USD') !== request.currency) return `Moeda difere do pedido (${request.currency}).`;
+  return null;
+}

@@ -5,7 +5,7 @@ import { spawn } from 'node:child_process';
 import { mkdtemp, cp, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { validateTopupRequest, clientStatement, spendByModel, ensureCreditPlan, CREDIT_PLAN } from '../src/credits.js';
+import { validateTopupRequest, clientStatement, spendByModel, ensureCreditPlan, CREDIT_PLAN, paymentSignature, verifyPaymentSignature } from '../src/credits.js';
 import { buildWallets } from '../src/topup.js';
 
 test('pedido de recarga aceita de US$ 5 a 10.000 com até duas casas e limita pendências', () => {
@@ -73,7 +73,7 @@ test('fluxo de créditos: cliente pede recarga, admin aprova, chamada desconta d
   const probe = http.createServer(); await new Promise(resolve => probe.listen(0, '127.0.0.1', resolve));
   const port = probe.address().port; await new Promise(resolve => probe.close(resolve));
   const adminKey = 'admin-key-1234567890123';
-  const child = spawn(process.execPath, [path.join(dir, 'src/server.js')], { env: { ...process.env, NODE_ENV: 'test', PORT: String(port), TEST_UPSTREAM_URL: `http://127.0.0.1:${mock.address().port}`, ANUBIS_ADMIN_KEY: adminKey, ANUBIS_ENCRYPTION_KEY: 'ab'.repeat(32), DATABASE_URL: '' }, stdio: ['ignore', 'pipe', 'pipe'] });
+  const child = spawn(process.execPath, [path.join(dir, 'src/server.js')], { env: { ...process.env, NODE_ENV: 'test', PORT: String(port), TEST_UPSTREAM_URL: `http://127.0.0.1:${mock.address().port}`, ANUBIS_ADMIN_KEY: adminKey, ANUBIS_ENCRYPTION_KEY: 'ab'.repeat(32), DATABASE_URL: '', ANUBIS_PAYMENT_WEBHOOK_SECRET: 'segredo-de-teste-com-mais-de-32-caracteres' }, stdio: ['ignore', 'pipe', 'pipe'] });
   t.after(async () => { child.kill(); await new Promise(resolve => mock.close(resolve)); await rm(dir, { recursive: true, force: true }); });
   await new Promise((resolve, reject) => { child.stdout.once('data', resolve); child.once('exit', code => reject(new Error(`server exited ${code}`))); });
   const base = `http://127.0.0.1:${port}`;
@@ -144,4 +144,32 @@ test('fluxo de créditos: cliente pede recarga, admin aprova, chamada desconta d
   credits = await (await fetch(`${base}/me/credits`, { headers: client })).json();
   assert.equal(credits.wallet.balance, '9.85');
   assert.equal(credits.requests.find(item => item.id === second.id).reason, 'Pagamento não encontrado');
+
+  // Confirmação automática: gateway assina o corpo; valor precisa bater; reenvio não credita de novo.
+  const secret = 'segredo-de-teste-com-mais-de-32-caracteres';
+  const confirm = (data, signer = secret, at = Date.now()) => {
+    const raw = JSON.stringify(data);
+    return fetch(`${base}/payments/confirm`, { method: 'POST', headers: { 'content-type': 'application/json', 'x-anubis-timestamp': String(at), 'x-anubis-signature': paymentSignature(signer, String(at), raw) }, body: raw });
+  };
+  response = await post('/me/topup-requests', { amount: '25' }, client);
+  const paid = (await response.json()).request;
+  assert.equal((await confirm({ requestId: paid.id, amount: '25', currency: 'USD', reference: 'pix-123' }, 'outro-segredo-qualquer-com-32-caracteres!')).status, 401);
+  assert.equal((await confirm({ requestId: paid.id, amount: '25', currency: 'USD', reference: 'pix-123' }, secret, Date.now() - 10 * 60_000)).status, 401);
+  assert.equal((await confirm({ requestId: paid.id, amount: '20', currency: 'USD', reference: 'pix-123' })).status, 400);
+  response = await confirm({ requestId: paid.id, amount: '25', currency: 'USD', reference: 'pix-123', provider: 'teste' });
+  assert.equal(response.status, 200);
+  assert.equal((await response.json()).request.status, 'approved');
+  response = await confirm({ requestId: paid.id, amount: '25', currency: 'USD', reference: 'pix-123' });
+  assert.equal(response.status, 200); assert.equal((await response.json()).duplicate, true);
+  assert.equal((await confirm({ requestId: paid.id, amount: '25', currency: 'USD', reference: 'pix-999' })).status, 409);
+  credits = await (await fetch(`${base}/me/credits`, { headers: client })).json();
+  assert.equal(credits.wallet.balance, '34.85', 'recarga confirmada entra uma única vez');
+});
+
+test('assinatura de pagamento exige segredo longo, janela de 5 minutos e HMAC correto', () => {
+  const secret = 'x'.repeat(32); const raw = '{"a":1}'; const at = String(Date.now());
+  assert.equal(verifyPaymentSignature({ secret, timestamp: at, signature: paymentSignature(secret, at, raw), raw }), null);
+  assert.match(verifyPaymentSignature({ secret: 'curto', timestamp: at, signature: '', raw }), /desligada/);
+  assert.match(verifyPaymentSignature({ secret, timestamp: at, signature: paymentSignature(secret, at, raw + ' '), raw }), /Assinatura/);
+  assert.match(verifyPaymentSignature({ secret, timestamp: String(Date.now() - 6 * 60_000), signature: paymentSignature(secret, at, raw), raw }), /janela/);
 });
