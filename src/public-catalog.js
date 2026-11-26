@@ -173,6 +173,8 @@ function publicOriginal(original, sale) {
   }
   if (!any) return null;
   out.discount = Object.fromEntries(PRICE_FIELDS.map(field => [field, out[field] === null || sale[field] === null ? null : discount(out[field], sale[field])]));
+  // O original só é público quando a venda sai mais barata em algum campo; sem desconto ele fica apenas no admin.
+  if (!Object.values(out.discount).some(value => typeof value === 'number' && value > 0)) return null;
   return out;
 }
 

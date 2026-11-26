@@ -97,3 +97,8 @@ test('catálogo público mostra preço original e desconto sem expor custo', () 
   assert.equal(item.originalPrice.discount.output, 87);
   assert.equal(item.originalPrice.discount.cacheRead, null);
 });
+
+test('preço original sem desconto não sai no catálogo público', () => {
+  const [item] = buildPublicCatalog({ routes: routes.slice(0, 1), connectionForRoute: () => connection, resolve: () => ({ multiplier: '5' }), originals: { 'claude-opus': { currency: 'USD', input: '1', output: '2' } }, now });
+  assert.equal(item.originalPrice, null);
+});
