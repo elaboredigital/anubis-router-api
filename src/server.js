@@ -1426,12 +1426,13 @@ const server = http.createServer(async (req, res) => {
       const { adapter, config } = gateway;
       const chunks = []; let size = 0;
       for await (const chunk of req) { size += chunk.length; if (size > 64 * 1024) return json(res, 413, { error: 'Corpo muito grande.' }); chunks.push(chunk); }
+      const rawBody = Buffer.concat(chunks).toString('utf8');
       let data;
-      try { data = parseNotification(Buffer.concat(chunks).toString('utf8'), req.headers['content-type'] || ''); }
+      try { data = parseNotification(rawBody, req.headers['content-type'] || ''); }
       catch { return json(res, 400, { error: 'Corpo inválido.' }); }
       const orderId = adapter.orderId(data);
       const request = orderId ? topupRequests.find(item => item.id === orderId) : null;
-      const verdict = adapter.evaluate(config, data, request);
+      const verdict = adapter.evaluate(config, data, request, { raw: rawBody, headers: req.headers });
       if (verdict.error) return json(res, 400, { error: verdict.error });
       if (!verdict.approve) {
         console.log(`${adapter.label}: pedido ${orderId || '?'} não creditado (${verdict.reason}), transação ${verdict.reference || '?'}`);

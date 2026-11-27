@@ -7,12 +7,20 @@
 //   config(env)                   credenciais lidas das variáveis; null quando o gateway não está configurado
 //   checkout(config, request, o)  cria o pagamento: { action, method, fields } (formulário) ou { redirect } (link)
 //   orderId(data)                 ID do pedido de recarga dentro da notificação
-//   evaluate(config, data, req)   { error } para notificação inválida, ou { approve, reason, reference, method }
+//   evaluate(config, data, req, { raw, headers })  { error } para notificação inválida, ou { approve, reason, reference, method }
 import { payssionConfig, payssionCheckout, evaluatePayssionNotify } from './credits.js';
+import { coinbaseConfig, coinbaseCheckout, evaluateCoinbaseNotify } from './coinbase.js';
 
 const clip = (value, max) => (typeof value === 'string' ? value.slice(0, max) : null);
 
 export const ADAPTERS = Object.freeze({
+  coinbase: {
+    id: 'coinbase', label: 'Coinbase (cripto)', methods: ['USDC'],
+    config: env => coinbaseConfig(env),
+    checkout: (config, request, options) => coinbaseCheckout(config, request, options),
+    orderId: data => (typeof data?.metadata?.orderId === 'string' ? data.metadata.orderId : null),
+    evaluate: (config, data, request, context) => evaluateCoinbaseNotify(config, data, request, context),
+  },
   payssion: {
     id: 'payssion', label: 'Payssion', methods: ['PIX', 'Boleto', 'Cartão'],
     config: env => payssionConfig(env),
