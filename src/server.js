@@ -5,7 +5,7 @@ import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
-import { openStore } from './store.js';
+import { openStore, openEntries } from './store.js';
 import { connectors, connector } from './connectors.js';
 import { providerFetch, validBase } from './provider-http.js';
 import { openUsageStore, usageObserver, summarizeUsage, estimateInputTokens, finalizeUsage, DEFAULT_USAGE_RETENTION, normalizeUsageRetention, validateUsageRetention } from './usage.js';
@@ -29,8 +29,9 @@ import { MAXROUTER_PRICING_PAGE, MAXROUTER_PRICING_URL, parseMaxRouterPrices } f
 import { buildAdminAvailability, buildPublicCatalog, modelPricing } from './public-catalog.js';
 import { SESSION_TTL_MS, tokenHash, newToken, hashPassword, verifyPassword, validateSignup, findAccountByLogin, issueEmailToken, consumeEmailToken, publicAccount, createLimiter } from './accounts.js';
 import { createMailer } from './mailer.js';
+import { findGateway, publicGateways, parseNotification } from './payments.js';
 import { createFx, normalizeFxConfig, validateFxConfig, DEFAULT_FX_CONFIG } from './fx.js';
-import { CREDIT_PLAN, TOPUP_PRESETS, MIN_TOPUP, MAX_TOPUP, ensureCreditPlan, validateTopupRequest, clientTopupRequest, clientStatement, spendByModel, verifyPaymentSignature, validatePaymentConfirmation, payssionConfig, payssionCheckout, evaluatePayssionNotify } from './credits.js';
+import { CREDIT_PLAN, TOPUP_PRESETS, MIN_TOPUP, MAX_TOPUP, ensureCreditPlan, validateTopupRequest, clientTopupRequest, clientStatement, spendByModel, verifyPaymentSignature, validatePaymentConfirmation } from './credits.js';
 import { makeReferralCode, safeText, normalizeReferral, validateRegister, validateQualify, applyQualify, validateStatus, applyStatus, buildClientReferralReport, buildAdminReferralReport, validateMoveCredit } from './referrals.js';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -75,6 +76,17 @@ if (!adminKey || adminKey.length < 16 || adminKey.includes('crie_') || !/^[a-f0-
 const masterKey = Buffer.from(encryptionKey, 'hex');
 const upstream = process.env.NODE_ENV === 'test' && process.env.TEST_UPSTREAM_URL ? process.env.TEST_UPSTREAM_URL : 'https://api.xkiro.com';
 const store = await openStore(root);
+// Razão, recargas e pedidos de recarga: uma linha por item (ver openEntries), sem regravar a lista inteira.
+const entries = await openEntries(root);
+/** Lê os itens de um tipo; na primeira vez, copia a lista antiga do store (que fica intacta como cópia). */
+async function loadEntries(kind) {
+  const current = await entries.list(kind);
+  if (current.length) return current;
+  const legacy = await store.load(kind, []);
+  if (!Array.isArray(legacy)) throw new Error(`Dados de ${kind} inválidos`);
+  if (legacy.length) { await entries.upsertMany(kind, legacy); console.warn(`${kind}: ${legacy.length} itens migrados para uma linha por item.`); }
+  return legacy;
+}
 const usageStore = await openUsageStore(root);
 const traffic = createTrafficCounters();
 let routes = await store.load('routes', defaultRoutes);
@@ -102,14 +114,31 @@ plans = plans.map(plan => {
   return migrated;
 });
 if (!Array.isArray(clientKeys) || !credentials || Array.isArray(credentials) || typeof credentials !== 'object') throw new Error('Dados persistidos inválidos');
-let ledger = await store.load('ledger', []);
-if (!Array.isArray(ledger)) throw new Error('Ledger inválido');
+let ledger = await loadEntries('ledger');
 // Plano padrão de créditos pré-pagos em USD: criado uma vez, depois editável pelo admin como qualquer plano.
 if (!plans.some(plan => plan?.id === CREDIT_PLAN.id)) { plans = ensureCreditPlan(plans); await store.save('plans', plans); }
-let topupRequests = await store.load('topup-requests', []);
-if (!Array.isArray(topupRequests)) throw new Error('Pedidos de recarga inválidos');
-let topups = await store.load('topups', []);
-if (!Array.isArray(topups)) throw new Error('Recargas inválidas');
+let topupRequests = await loadEntries('topup-requests');
+let topups = await loadEntries('topups');
+// Outro processo (ex.: o container antigo durante um redeploy) pode gravar itens novos: relê a cada 15 s.
+const replaceById = (list, item) => { const index = list.findIndex(x => x?.id === item.id); if (index < 0) return [...list, item]; const next = [...list]; next[index] = item; return next; };
+let entriesCursor = await entries.now();
+async function syncEntries() {
+  try {
+    const since = new Date(Date.parse(entriesCursor) - 5000).toISOString();
+    let cursor = entriesCursor;
+    for (const kind of ['ledger', 'topups', 'topup-requests']) {
+      const changed = await entries.changedSince(kind, since);
+      if (changed.cursor > cursor) cursor = changed.cursor;
+      for (const item of changed.items) {
+        if (kind === 'ledger') ledger = upsertLedgerEntry(ledger, item);
+        else if (kind === 'topups') topups = replaceById(topups, item);
+        else topupRequests = replaceById(topupRequests, item);
+      }
+    }
+    entriesCursor = cursor;
+  } catch (error) { console.error('Releitura da razão falhou:', error.code || error.message); }
+}
+setInterval(() => { void syncEntries(); }, 15_000).unref();
 let routingPolicy = normalizeRoutingPolicy(await store.load('routing-policy', DEFAULT_ROUTING_POLICY));
 if (validateRoutingPolicy(routingPolicy)) routingPolicy = normalizeRoutingPolicy(DEFAULT_ROUTING_POLICY);
 // Contador volátil de balanceamento: não persiste estado nem afeta quotas ou cobrança.
@@ -158,7 +187,7 @@ let adminSessions = await store.load('admin-sessions', []);
 if (!adminAccounts.length && process.env.ANUBIS_ADMIN_USER && process.env.ANUBIS_ADMIN_PASSWORD) {
   adminAccounts = [{ id: randomUUID(), username: process.env.ANUBIS_ADMIN_USER.trim().toLowerCase(), passwordHash: hashPassword(process.env.ANUBIS_ADMIN_PASSWORD), createdAt: new Date().toISOString(), passwordChangedAt: null }];
   await store.save('admin-accounts', adminAccounts);
-  console.log(`Conta de admin "${adminAccounts[0].username}" criada a partir das variáveis de ambiente.`);
+  console.warn(`Conta de admin "${adminAccounts[0].username}" criada a partir das variáveis de ambiente.`);
 }
 const adminLoginLimit = createLimiter(10, 15 * 60_000);
 function adminSessionFor(req) {
@@ -319,7 +348,7 @@ function saleSnapshotFor(startedAt, provider, model, plan, publicModel = null) {
 async function recordLedgerCompletion(record) {
   const entry = buildLedgerEntry(record, record?.planId || null);
   if (!entry) return;
-  await mutate(async () => { ledger = upsertLedgerEntry(ledger, entry); await store.save('ledger', ledger); });
+  await mutate(async () => { await entries.upsert('ledger', entry); ledger = upsertLedgerEntry(ledger, entry); });
 }
 /**
  * Decide um pedido de recarga. Aprovar cria a recarga uma única vez (idempotencyKey) e coloca no plano de créditos
@@ -337,7 +366,7 @@ async function decideTopupRequest(id, action, note = '', payment = null) {
       const owner = clientKeys.find(key => key.id === current.keyId);
       if (!owner || owner.active === false) { failure = [400, 'A conta deste pedido está revogada.']; return; }
       const topup = { id: randomUUID(), keyId: current.keyId, amount: current.amount, currency: current.currency, note: note || 'Recarga solicitada pelo cliente', idempotencyKey: `request-${current.id}`, planId: owner.planId || null, createdAt: decidedAt, requestId: current.id, payment };
-      const nextTopups = [...topups, topup]; await store.save('topups', nextTopups); topups = nextTopups;
+      await entries.upsert('topups', topup); topups = [...topups, topup];
       // Quem compra crédito passa a ser cobrado pelo saldo: chaves da conta sem plano entram no plano de créditos.
       if (clientKeys.some(key => (key.id === owner.id || key.parentId === owner.id) && !key.planId)) {
         const nextKeys = clientKeys.map(key => (key.id === owner.id || key.parentId === owner.id) && !key.planId ? { ...key, planId: CREDIT_PLAN.id } : key);
@@ -347,8 +376,8 @@ async function decideTopupRequest(id, action, note = '', payment = null) {
     } else {
       updated = { ...current, status: 'rejected', decidedAt, reason: note || 'Pagamento não confirmado.' };
     }
-    const next = topupRequests.map(item => item.id === current.id ? updated : item);
-    await store.save('topup-requests', next); topupRequests = next; result = updated;
+    await entries.upsert('topup-requests', updated);
+    topupRequests = topupRequests.map(item => item.id === current.id ? updated : item); result = updated;
   });
   const wallet = result ? buildWallets(clientKeys, plans, topups, ledger).find(item => item.keyId === result.keyId) || null : null;
   return { failure, request: result, wallet };
@@ -861,9 +890,9 @@ const server = http.createServer(async (req, res) => {
             if (record?.status !== 'completed' || known.has(`led-${record.requestId}`)) continue;
             const entry = buildLedgerEntry(record, record.planId || null);
             if (!entry) continue;
+            await entries.upsert('ledger', entry);
             ledger = upsertLedgerEntry(ledger, entry); known.add(entry.id); added++;
           }
-          await store.save('ledger', ledger);
         });
         return json(res, 200, { added, counts: summarizeLedger(ledger, records).counts });
       }
@@ -882,7 +911,7 @@ const server = http.createServer(async (req, res) => {
             if (existing) { saved = existing; duplicate = true; return; }
           }
           saved = { id: randomUUID(), ...topup, planId: plan?.id || null, createdAt: new Date().toISOString() };
-          const next = [...topups, saved]; await store.save('topups', next); topups = next;
+          await entries.upsert('topups', saved); topups = [...topups, saved];
         });
         const wallet = buildWallets(clientKeys, plans, topups, ledger).find(item => item.keyId === topup.keyId) || null;
         return json(res, duplicate ? 200 : 201, { topup: saved, wallet, duplicate });
@@ -1388,27 +1417,29 @@ const server = http.createServer(async (req, res) => {
       if (outcome.failure) return json(res, outcome.failure[0], { error: outcome.failure[1] });
       return json(res, 200, { request: clientTopupRequest(outcome.request), duplicate: false });
     }
-    // Notificação da Payssion (Notify URL do app): credita o pedido quando o pagamento foi concluído e bate com ele.
-    if (req.method === 'POST' && url.pathname === '/payments/payssion/notify') {
-      const config = payssionConfig();
-      if (!config) return json(res, 404, { error: 'Rota não encontrada' });
+    // Notificação de pagamento de qualquer gateway ligado (/payments/<gateway>/notify): credita o pedido quando o
+    // pagamento foi concluído e bate com ele em valor e moeda. Reenvios do mesmo pagamento não creditam de novo.
+    const notifyMatch = /^\/payments\/([a-z0-9-]{2,40})\/notify$/.exec(url.pathname);
+    if (req.method === 'POST' && notifyMatch) {
+      const gateway = findGateway(notifyMatch[1]);
+      if (!gateway) return json(res, 404, { error: 'Rota não encontrada' });
+      const { adapter, config } = gateway;
       const chunks = []; let size = 0;
       for await (const chunk of req) { size += chunk.length; if (size > 64 * 1024) return json(res, 413, { error: 'Corpo muito grande.' }); chunks.push(chunk); }
-      const raw = Buffer.concat(chunks).toString('utf8');
       let data;
-      try { data = /^application\/json\b/i.test(req.headers['content-type'] || '') ? JSON.parse(raw) : Object.fromEntries(new URLSearchParams(raw)); }
+      try { data = parseNotification(Buffer.concat(chunks).toString('utf8'), req.headers['content-type'] || ''); }
       catch { return json(res, 400, { error: 'Corpo inválido.' }); }
-      const request = typeof data?.order_id === 'string' ? topupRequests.find(item => item.id === data.order_id) : null;
-      const verdict = evaluatePayssionNotify(config, data, request);
+      const orderId = adapter.orderId(data);
+      const request = orderId ? topupRequests.find(item => item.id === orderId) : null;
+      const verdict = adapter.evaluate(config, data, request);
       if (verdict.error) return json(res, 400, { error: verdict.error });
-      const reference = typeof data.transaction_id === 'string' ? data.transaction_id.slice(0, 120) : '';
       if (!verdict.approve) {
-        console.log(`Payssion: pedido ${data.order_id || '?'} não creditado (${verdict.reason}), transação ${reference || '?'}`);
+        console.log(`${adapter.label}: pedido ${orderId || '?'} não creditado (${verdict.reason}), transação ${verdict.reference || '?'}`);
         return json(res, 200, { ok: true, credited: false, reason: verdict.reason });
       }
       if (request.status === 'approved') return json(res, 200, { ok: true, credited: false, reason: 'ja_creditado' });
-      const payment = { provider: 'payssion', reference, method: typeof data.pm_id === 'string' ? data.pm_id.slice(0, 40) : null, confirmedAt: new Date().toISOString() };
-      const outcome = await decideTopupRequest(request.id, 'approve', `Pago via Payssion (${reference})`, payment);
+      const payment = { provider: adapter.id, reference: verdict.reference, method: verdict.method || null, confirmedAt: new Date().toISOString() };
+      const outcome = await decideTopupRequest(request.id, 'approve', `Pago via ${adapter.label} (${verdict.reference})`, payment);
       if (outcome.failure && outcome.failure[0] !== 409) return json(res, outcome.failure[0], { error: outcome.failure[1] });
       return json(res, 200, { ok: true, credited: !outcome.failure });
     }
@@ -1518,7 +1549,7 @@ const server = http.createServer(async (req, res) => {
         return json(res, 200, {
           wallet: wallet ? { currency: wallet.currency, balance: wallet.balance, credits: wallet.credits, consumed: wallet.consumed, requests: wallet.requests, negative: wallet.negative } : null,
           presets: TOPUP_PRESETS, min: MIN_TOPUP, max: MAX_TOPUP, currency: 'USD',
-          checkout: { provider: 'payssion', enabled: !!payssionConfig() },
+          checkout: (() => { const gateways = publicGateways(); return { enabled: gateways.length > 0, provider: gateways[0]?.id || null, gateways }; })(),
           requests: topupRequests.filter(item => item.keyId === root).sort((a, b) => b.createdAt.localeCompare(a.createdAt)).slice(0, 20).map(clientTopupRequest),
           statement, byModel: spendByModel(clientStatement(ledger, familyKeys, 200)),
         });
@@ -1530,19 +1561,23 @@ const server = http.createServer(async (req, res) => {
         const checked = validateTopupRequest(data, pending);
         if (checked.error) return json(res, 400, { error: checked.error });
         const item = { id: randomUUID(), keyId: root, requestedBy: key.id, amount: checked.amount, currency: checked.currency, status: 'pending', createdAt: now, decidedAt: null, reason: null, topupId: null };
-        await mutate(async () => { const next = [...topupRequests, item]; await store.save('topup-requests', next); topupRequests = next; });
+        await mutate(async () => { await entries.upsert('topup-requests', item); topupRequests = [...topupRequests, item]; });
         return json(res, 201, { request: clientTopupRequest(item) });
       }
-      // Pagamento online do pedido: devolve o formulário assinado da página hospedada da Payssion.
+      // Pagamento online do pedido no gateway escolhido (o primeiro ligado, se o cliente não escolher).
       const checkoutMatch = /^\/me\/topup-requests\/([\w-]{1,80})\/checkout$/.exec(url.pathname);
       if (req.method === 'POST' && checkoutMatch) {
-        const config = payssionConfig();
-        if (!config) return json(res, 404, { error: 'Pagamento online ainda não está disponível. Aguarde as instruções da equipe.' });
+        let data = {};
+        try { data = await body(req); } catch { data = {}; }
+        const wanted = typeof data?.gateway === 'string' ? data.gateway : publicGateways()[0]?.id;
+        const gateway = wanted ? findGateway(wanted) : null;
+        if (!gateway) return json(res, 404, { error: 'Pagamento online ainda não está disponível. Aguarde as instruções da equipe.' });
         const request = topupRequests.find(item => item.id === checkoutMatch[1] && item.keyId === root);
         if (!request) return json(res, 404, { error: 'Pedido não encontrado.' });
         if (request.status !== 'pending') return json(res, 409, { error: 'Este pedido já foi decidido.' });
         const site = (process.env.ANUBIS_SITE_URL || 'https://anubisrouter.com').replace(/\/+$/, '');
-        return json(res, 200, payssionCheckout(config, request, { returnUrl: `${site}/minha-conta?pagamento=retorno` }));
+        try { return json(res, 200, { gateway: gateway.adapter.id, ...(await gateway.adapter.checkout(gateway.config, request, { returnUrl: `${site}/minha-conta?pagamento=retorno` })) }); }
+        catch (error) { console.error(`${gateway.adapter.label}: checkout falhou`, error.message); return json(res, 502, { error: 'Não foi possível abrir o pagamento agora. Tente de novo ou use outro meio.' }); }
       }
       if (req.method === 'GET' && url.pathname === '/me/stats') {
         const period = periodFrom(url);
@@ -1622,8 +1657,10 @@ const server = http.createServer(async (req, res) => {
         delete input.tools; delete input.tool_choice;
       }
       if (clientPlan && !planAllowsModel(clientPlan, input.model)) return json(res, 403, { error: { message: 'Modelo não permitido neste plano', type: 'permission_error' } });
-      const records = await usageStore.list();
-      const quota = checkPlanQuota(clientPlan, usageInWindow(records, clientKey.id, monthWindow()));
+      // Cotas contam só os registros desta chave no mês corrente, direto do banco (sem o teto global de 10 mil).
+      const month = monthWindow();
+      const records = await usageStore.listForKeys([clientKey.id], month.start);
+      const quota = checkPlanQuota(clientPlan, usageInWindow(records, clientKey.id, month));
       // A franquia diária conta tokens estimados e chamadas canceladas: o fornecedor já consumiu a cota.
       const dailyQuota = checkDailyQuota(clientPlan, usageInWindow(records, clientKey.id, dayWindow(), ['completed', 'cancelled']));
       for (const check of [quota, dailyQuota]) if (!check.allowed) {

@@ -32,9 +32,15 @@ export async function openUsageStore(root, databaseUrl = process.env.DATABASE_UR
     const pool = new pg.Pool({ connectionString: databaseUrl, max: 5 });
     await pool.query('CREATE TABLE IF NOT EXISTS anubis_usage (id UUID PRIMARY KEY, started_at TIMESTAMPTZ NOT NULL, record JSONB NOT NULL)');
     await pool.query('CREATE INDEX IF NOT EXISTS anubis_usage_started_idx ON anubis_usage(started_at DESC)');
+    await pool.query("CREATE INDEX IF NOT EXISTS anubis_usage_key_started_idx ON anubis_usage ((record->>'clientKeyId'), started_at)");
     return {
       async write(record) { await pool.query('INSERT INTO anubis_usage (id, started_at, record) VALUES ($1, $2, $3) ON CONFLICT (id) DO UPDATE SET record = EXCLUDED.record', [record.id, record.startedAt, JSON.stringify(record)]); },
       async list() { const { rows } = await pool.query('SELECT record FROM anubis_usage ORDER BY started_at DESC LIMIT 10000'); return rows.map(r => r.record); },
+      /** Todos os registros das chaves informadas desde `since` (sem o teto de 10 mil): base das cotas do plano. */
+      async listForKeys(keyIds, since) {
+        const { rows } = await pool.query("SELECT record FROM anubis_usage WHERE record->>'clientKeyId' = ANY($1) AND started_at >= $2", [keyIds, since]);
+        return rows.map(r => r.record);
+      },
       async prune(retentionHours, now = new Date()) {
         const cutoff = cutoffFor(retentionHours, now);
         if (!cutoff) return 0;
@@ -54,6 +60,13 @@ export async function openUsageStore(root, databaseUrl = process.env.DATABASE_UR
     write(record) {
       const task = writes.then(async () => { await mkdir(path.dirname(file), { recursive: true }); await appendFile(file, JSON.stringify(record) + '\n', { mode: 0o600 }); });
       writes = task.catch(() => {}); return task;
+    },
+    async listForKeys(keyIds, since) {
+      await writes; let text;
+      try { text = await readFile(file, 'utf8'); } catch (error) { if (error.code === 'ENOENT') return []; throw error; }
+      const ids = new Set(keyIds); const limit = Date.parse(since); const items = new Map();
+      for (const line of text.split('\n')) if (line) { const item = JSON.parse(line); items.set(item.id, item); }
+      return [...items.values()].filter(item => ids.has(item.clientKeyId) && Date.parse(item.startedAt) >= limit);
     },
     async list() {
       await writes; let text;
