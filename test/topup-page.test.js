@@ -6,7 +6,7 @@ import { mkdtemp, cp, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
-test('painel serve top up PAYG com recargas simuladas e plano pronto', async t => {
+test('painel serve top up PAYG com crédito manual e plano pronto', async t => {
   const dir = await mkdtemp(path.join(os.tmpdir(), 'anubis-topup-test-'));
   await cp('src', path.join(dir, 'src'), { recursive: true });
   await cp('../admin', path.join(dir, 'public'), { recursive: true });
@@ -38,7 +38,7 @@ test('painel serve top up PAYG com recargas simuladas e plano pronto', async t =
   assert.match(html, /data-nav="topup"/);
   for (const id of ['topup-create-plan', 'topup-plan-message', 'topup-wallets-count', 'topup-credits', 'topup-consumed', 'topup-pending', 'topup-form', 'topup-key', 'topup-amount', 'topup-currency', 'topup-note', 'topup-message', 'topup-wallet-list', 'topup-history']) assert.match(html, new RegExp(`id="${id}"`));
   for (const amount of ['10', '20', '50', '100', '200', '500']) assert.match(html, new RegExp(`data-amount="${amount}"`));
-  assert.match(html, /sem checkout/i);
+  assert.match(html, /Crédito manual entra no saldo real do cliente/i);
   assert.match(html, /não é cobrado/i);
 
   const script = await (await fetch(`${base}/app.js`)).text();

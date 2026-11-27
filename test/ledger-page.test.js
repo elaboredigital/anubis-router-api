@@ -37,7 +37,7 @@ test('painel serve a página de razão financeira com versões e reconciliação
   assert.match(html, /Razão financeira/);
   for (const id of ['ledger-reconcile', 'ledger-counts', 'ledger-pending', 'ledger-totals', 'price-history', 'ledger-entries', 'ledger-message']) assert.match(html, new RegExp(`id="${id}"`));
   assert.match(html, /não são somados entre moedas diferentes/i);
-  assert.match(html, /nada é debitado, creditado, reservado/i);
+  assert.match(html, /Cada chamada concluída desconta do saldo do cliente/i);
 
   const script = await (await fetch(`${base}/app.js`)).text();
   assert.match(script, /ledger: '\/ledger'/);
