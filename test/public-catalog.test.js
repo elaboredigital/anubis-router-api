@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { buildPublicCatalog, salePrice, uptimeFor, modelFamily, modelPricing, averageCost } from '../src/public-catalog.js';
+import { buildAdminAvailability, buildPublicCatalog, salePrice, uptimeFor, modelFamily, modelPricing, averageCost } from '../src/public-catalog.js';
 
 const now = Date.parse('2026-11-25T12:30:00Z');
 const connection = { provider: 'wusrouter', models: [
@@ -101,4 +101,37 @@ test('catálogo público mostra preço original e desconto sem expor custo', () 
 test('preço original sem desconto não sai no catálogo público', () => {
   const [item] = buildPublicCatalog({ routes: routes.slice(0, 1), connectionForRoute: () => connection, resolve: () => ({ multiplier: '5' }), originals: { 'claude-opus': { currency: 'USD', input: '1', output: '2' } }, now });
   assert.equal(item.originalPrice, null);
+});
+
+test('disponibilidade do admin repete o catálogo público e soma tentativas por fornecedor', () => {
+  const a = { id: 'conn-a', name: 'A', provider: 'wusrouter', models: connection.models };
+  const b = { id: 'conn-b', name: 'B', provider: 'maxrouter', models: connection.models };
+  const twoRoutes = [{ ...routes[0], connectionId: 'conn-a' }, { ...routes[0], connectionId: 'conn-b', priority: 20 }];
+  const byId = { 'conn-a': a, 'conn-b': b };
+  const at = h => new Date(now - h * 3600_000).toISOString();
+  const records = [
+    { requestId: 'r1', publicModel: 'claude-opus', connectionId: 'conn-a', status: 'upstream_error', httpStatus: 503, failure: { reason: 'resposta_http' }, startedAt: at(1) },
+    { requestId: 'r1', publicModel: 'claude-opus', connectionId: 'conn-b', status: 'completed', startedAt: at(1) },
+    { requestId: 'r2', publicModel: 'claude-opus', connectionId: 'conn-a', status: 'completed', startedAt: at(0) },
+    { requestId: 'r3', publicModel: 'claude-opus', connectionId: 'conn-a', status: 'completed', startedAt: at(40) },
+  ];
+  const args = { routes: twoRoutes, connectionForRoute: r => byId[r.connectionId], resolve: () => ({ multiplier: '5' }), records, now };
+  const [publicItem] = buildPublicCatalog(args);
+  const [item] = buildAdminAvailability({ ...args, connections: [{ id: 'conn-a', status: 'valid', checkedAt: at(2) }, { id: 'conn-b', status: 'invalid' }] });
+  assert.deepEqual(item.price, publicItem.price);
+  assert.equal(item.uptime, 100);
+  assert.deepEqual(item.suppliers.map(s => [s.connectionId, s.connectionStatus, s.attempts, s.failures, s.successRate]), [['conn-a', 'valid', 2, 1, 50], ['conn-b', 'invalid', 1, 0, 100]]);
+  assert.equal(item.suppliers[0].lastFailure.httpStatus, 503);
+  assert.equal(item.suppliers[0].lastOkAt, at(0));
+});
+
+test('venda por chamada é comparada com a tabela por token numa chamada típica', () => {
+  const perCall = { provider: 'wusrouter', models: [{ id: 'up', name: 'Claude Opus 5.5', billingType: 'request', pricing: { request: '0.02' } }] };
+  const [item] = buildPublicCatalog({ routes: [{ id: 'anubis/claude-opus-5.5', upstreamModel: 'up', enabled: true }], connectionForRoute: () => perCall,
+    resolve: () => ({ manualPrice: { basis: 'per_request', currency: 'USD', request: '0.035' } }), originals: { 'anubis/claude-opus-5.5': { currency: 'USD', input: '4', output: '20' } }, now });
+  assert.equal(item.price.request, '0.035');
+  // 25 mil de entrada × US$ 4/1M + 2,5 mil de saída × US$ 20/1M = US$ 0,15.
+  assert.equal(item.originalPrice.request, '0.15');
+  assert.equal(item.originalPrice.discount.request, 77);
+  assert.deepEqual(item.originalPrice.typicalCall, { input: 25000, output: 2500 });
 });

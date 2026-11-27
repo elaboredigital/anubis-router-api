@@ -26,7 +26,10 @@ import { buildGlobalStats } from './global-stats.js';
 import { buildModelAnalytics } from './model-analytics.js';
 import { buildReadiness, normalizeReadinessUpdate, validateReadinessUpdate, commercialBlock, CONNECTION_BLOCKED, DEFAULT_READINESS_POLICY } from './provider-readiness.js';
 import { MAXROUTER_PRICING_PAGE, MAXROUTER_PRICING_URL, parseMaxRouterPrices } from './maxrouter-pricing.js';
-import { buildPublicCatalog, modelPricing } from './public-catalog.js';
+import { buildAdminAvailability, buildPublicCatalog, modelPricing } from './public-catalog.js';
+import { SESSION_TTL_MS, tokenHash, newToken, hashPassword, verifyPassword, validateSignup, findAccountByLogin, issueEmailToken, consumeEmailToken, publicAccount, createLimiter } from './accounts.js';
+import { createMailer } from './mailer.js';
+import { createFx, normalizeFxConfig, validateFxConfig, DEFAULT_FX_CONFIG } from './fx.js';
 import { CREDIT_PLAN, TOPUP_PRESETS, MIN_TOPUP, MAX_TOPUP, ensureCreditPlan, validateTopupRequest, clientTopupRequest, clientStatement, spendByModel, verifyPaymentSignature, validatePaymentConfirmation, payssionConfig, payssionCheckout, evaluatePayssionNotify } from './credits.js';
 import { makeReferralCode, safeText, normalizeReferral, validateRegister, validateQualify, applyQualify, validateStatus, applyStatus, buildClientReferralReport, buildAdminReferralReport, validateMoveCredit } from './referrals.js';
 
@@ -144,6 +147,46 @@ if (!Array.isArray(referrals)) throw new Error('Indicações inválidas');
 let referralAudit = await store.load('referral-audit', []);
 if (!Array.isArray(referralAudit)) throw new Error('Auditoria de indicações inválida');
 let referralCodes = await store.load('referral-codes', {});
+// Admin por usuário e senha. ANUBIS_ADMIN_USER/ANUBIS_ADMIN_PASSWORD só criam a primeira conta; a troca de senha é feita no painel.
+// A chave ANUBIS_ADMIN_KEY continua valendo para scripts e acesso de emergência.
+const ADMIN_SESSION_TTL_MS = 12 * 3600_000;
+// Cotação do dólar só para estimativas em reais no admin; a cobrança continua em USD.
+let fxConfig = normalizeFxConfig(await store.load('fx-config', DEFAULT_FX_CONFIG));
+const fx = createFx();
+let adminAccounts = await store.load('admin-accounts', []);
+let adminSessions = await store.load('admin-sessions', []);
+if (!adminAccounts.length && process.env.ANUBIS_ADMIN_USER && process.env.ANUBIS_ADMIN_PASSWORD) {
+  adminAccounts = [{ id: randomUUID(), username: process.env.ANUBIS_ADMIN_USER.trim().toLowerCase(), passwordHash: hashPassword(process.env.ANUBIS_ADMIN_PASSWORD), createdAt: new Date().toISOString(), passwordChangedAt: null }];
+  await store.save('admin-accounts', adminAccounts);
+  console.log(`Conta de admin "${adminAccounts[0].username}" criada a partir das variáveis de ambiente.`);
+}
+const adminLoginLimit = createLimiter(10, 15 * 60_000);
+function adminSessionFor(req) {
+  const token = /^Bearer (anubis_adm_.+)$/i.exec(req.headers.authorization || '')?.[1];
+  if (!token) return null;
+  const hash = tokenHash(token);
+  const session = adminSessions.find(item => item.hash === hash && Date.parse(item.expiresAt) > Date.now());
+  return session ? { session, account: adminAccounts.find(a => a.id === session.accountId) || null } : null;
+}
+// Contas de cliente (cadastro, confirmação por e-mail e login). Tokens e sessões ficam apenas como hash.
+let accounts = await store.load('accounts', []);
+let accountTokens = await store.load('account-tokens', []);
+let accountSessions = await store.load('account-sessions', []);
+const mailer = await createMailer();
+const siteUrl = (process.env.ANUBIS_SITE_URL || (process.env.ANUBIS_PUBLIC_URL || '').split(',')[0] || 'https://anubisrouter.com').trim().replace(/\/+$/, '');
+const authLimits = { login: createLimiter(10, 15 * 60_000), signup: createLimiter(5, 3600_000), email: createLimiter(3, 3600_000) };
+// Playground anônimo: só modelos grátis, algumas mensagens por IP em 24h e um teto diário global.
+const PLAYGROUND_MODELS = (process.env.PLAYGROUND_MODELS || 'anubis/gpt-5-codex:free,anubis/deepseek-v4.1-flash:free,anubis/qwen3.8-flash:free,anubis/mimo-v2.5:free').split(',').map(item => item.trim()).filter(Boolean);
+const PLAYGROUND_FREE_MESSAGES = Math.max(0, Number(process.env.PLAYGROUND_FREE_MESSAGES ?? 10) || 0);
+const PLAYGROUND_DAILY_CAP = Math.max(1, Number(process.env.PLAYGROUND_DAILY_CAP ?? 3000) || 3000);
+const PLAYGROUND_KEY = Object.freeze({ id: 'playground', name: 'Playground anônimo', prefix: 'playground', active: true, planId: null });
+const playgroundByIp = createLimiter(PLAYGROUND_FREE_MESSAGES, 24 * 3600_000);
+const playgroundAll = createLimiter(PLAYGROUND_DAILY_CAP, 24 * 3600_000);
+function clientIp(req) {
+  // O proxy da hospedagem acrescenta o IP real ao fim de X-Forwarded-For; entradas anteriores vêm do cliente.
+  const forwarded = String(req.headers['x-forwarded-for'] || '').split(',').map(item => item.trim()).filter(Boolean);
+  return forwarded.at(-1) || req.socket?.remoteAddress || 'desconhecido';
+}
 if (!referralCodes || typeof referralCodes !== 'object' || Array.isArray(referralCodes)) referralCodes = {};
 // Preço original (tabela do fabricante) por ID público: só exibição e comparação, nunca entra na cobrança.
 let originalPrices = await store.load('model-original-prices', {});
@@ -174,6 +217,7 @@ if (credentials.xkiro) { try { decrypt(credentials.xkiro); } catch { console.err
 if (!Array.isArray(credentials.connections)) credentials.connections = credentials.xkiro ? [{ id: 'legacy-xkiro', provider: 'xkiro', name: 'xKiro anterior', secret: credentials.xkiro, status: 'unverified', models: [] }] : [];
 for (const item of credentials.connections) { try { decrypt(item.secret); } catch { console.error('Não foi possível abrir as credenciais: verifique ANUBIS_ENCRYPTION_KEY.'); process.exit(1); } }
 const digest = value => createHash('sha256').update(value).digest('hex');
+const DUMMY_PASSWORD_HASH = hashPassword(randomBytes(16).toString('hex'));
 // Sessões emitidas pelo admin para usar chaves cadastradas no chat/área do cliente sem devolver a chave:
 // o valor original só existe no momento da criação, como hash; aqui guardamos apenas um token volátil em memória.
 const CLIENT_SESSION_TTL_MS = 30 * 60 * 1000;
@@ -197,7 +241,48 @@ function clientForRequest(req) {
     session.expiresAt = now + CLIENT_SESSION_TTL_MS;
     return key;
   }
+  if (value.startsWith('anubis_acct_')) return accountSessionKey(value, now);
   return clientKeys.find(k => k.active && equal(k.hash, digest(value))) || null;
+}
+function accountSession(value, now = Date.now()) {
+  const hash = tokenHash(value);
+  const session = accountSessions.find(item => item.hash === hash);
+  if (!session || Date.parse(session.expiresAt) <= now) return null;
+  const account = accounts.find(item => item.id === session.accountId && !item.disabled);
+  return account ? { session, account } : null;
+}
+function accountSessionKey(value, now = Date.now()) {
+  const found = accountSession(value, now);
+  return found?.account.keyId ? clientKeys.find(k => k.id === found.account.keyId && k.active) || null : null;
+}
+async function openAccountSession(account) {
+  const token = newToken('anubis_acct_');
+  const now = Date.now();
+  const item = { hash: tokenHash(token), accountId: account.id, createdAt: new Date(now).toISOString(), expiresAt: new Date(now + SESSION_TTL_MS).toISOString() };
+  await mutate(async () => {
+    const next = [...accountSessions.filter(s => Date.parse(s.expiresAt) > now), item].slice(-20_000);
+    await store.save('account-sessions', next); accountSessions = next;
+  });
+  return { token, expiresAt: item.expiresAt };
+}
+/** Conta confirmada sem chave recebe uma chave raiz no plano de créditos; o valor da chave raiz nunca é exibido. */
+async function ensureAccountKey(account) {
+  if (account.keyId && clientKeys.some(k => k.id === account.keyId)) return account;
+  const value = `anubis_${randomBytes(32).toString('base64url')}`;
+  const key = { id: randomUUID(), name: account.username, prefix: value.slice(0, 15), hash: digest(value), active: true, createdAt: new Date().toISOString(), planId: CREDIT_PLAN.id };
+  await mutate(async () => {
+    const keys = [...clientKeys, key]; await store.save('api-keys', keys); clientKeys = keys;
+    referralCodes[key.id] = makeReferralCode(); await store.save('referral-codes', referralCodes);
+    const list = accounts.map(a => a.id === account.id ? { ...a, keyId: key.id } : a); await store.save('accounts', list); accounts = list;
+  });
+  return accounts.find(a => a.id === account.id);
+}
+async function sendAccountEmail(account, type) {
+  const issued = issueEmailToken(accountTokens, { accountId: account.id, type });
+  await mutate(async () => { await store.save('account-tokens', issued.tokens); accountTokens = issued.tokens; });
+  const link = `${siteUrl}/${type === 'verify' ? 'confirmar' : 'entrar'}?token=${encodeURIComponent(issued.value)}`;
+  try { return (await mailer.send(account.email, type, { username: account.username, link })).sent; }
+  catch (error) { console.log(`E-mail ${type} para a conta ${account.id} falhou: ${error.code || error.message}`); return false; }
 }
 let writeQueue = Promise.resolve();
 function mutate(fn) { const next = writeQueue.then(fn); writeQueue = next.catch(() => {}); return next; }
@@ -463,6 +548,13 @@ async function checkConnection(c, secret) {
     return { models: list, priceSource: summarizePriceSource(list) };
   };
   const endpoint = profile.validation || c.validationPath;
+  // Fornecedor com catálogo público: a chave só se prova numa chamada real, de 1 token, a um modelo grátis.
+  if (!endpoint && profile.validationChat) {
+    const response = await providerFetch(originFor(c) + '/v1/chat/completions', { method: 'POST', headers: { authorization: `Bearer ${secret}`, 'content-type': 'application/json' }, body: JSON.stringify({ model: profile.validationChat, messages: [{ role: 'user', content: 'ping' }], max_tokens: 1 }), signal: AbortSignal.timeout(30000) });
+    if (!response.ok) throw new Error(`Credencial não validada (HTTP ${response.status})`);
+    await response.body?.cancel();
+    return { status: 'valid', ...(await models()) };
+  }
   if (!endpoint) return { status: 'unverified', ...(await models()) };
   const response = await providerFetch(originFor(c) + endpoint, { headers: { authorization: `Bearer ${secret}` }, signal: AbortSignal.timeout(15000) });
   if (!response.ok) throw new Error(`Credencial não validada (HTTP ${response.status})`);
@@ -512,8 +604,58 @@ const server = http.createServer(async (req, res) => {
       res.writeHead(200, { 'content-type': `${mime}; charset=utf-8`, 'cache-control': 'no-store', 'content-security-policy': "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'", 'x-content-type-options': 'nosniff' });
       return res.end(content);
     }
+    if (req.method === 'POST' && url.pathname === '/admin/login') {
+      if (!/^application\/json\b/i.test(req.headers['content-type'] || '')) return json(res, 415, { error: 'Use application/json' });
+      if (!adminLoginLimit.take(tokenHash(clientIp(req)))) return json(res, 429, { error: 'Muitas tentativas. Aguarde 15 minutos.' });
+      let data; try { data = await body(req); } catch { return json(res, 400, { error: 'Corpo inválido.' }); }
+      const username = typeof data?.username === 'string' ? data.username.trim().toLowerCase() : '';
+      const account = adminAccounts.find(a => a.username === username) || null;
+      const valid = verifyPassword(typeof data?.password === 'string' ? data.password : '', account?.passwordHash || DUMMY_PASSWORD_HASH) && !!account;
+      if (!valid) return json(res, 401, { error: 'Usuário ou senha incorretos.' });
+      const token = newToken('anubis_adm_');
+      const now = Date.now();
+      const item = { hash: tokenHash(token), accountId: account.id, createdAt: new Date(now).toISOString(), expiresAt: new Date(now + ADMIN_SESSION_TTL_MS).toISOString() };
+      await mutate(async () => { const next = [...adminSessions.filter(x => Date.parse(x.expiresAt) > now), item].slice(-500); await store.save('admin-sessions', next); adminSessions = next; });
+      return json(res, 200, { token, expiresAt: item.expiresAt, username: account.username });
+    }
     if (url.pathname.startsWith('/admin/')) {
-      if (!authorized(req, adminKey)) return json(res, 401, { error: 'Chave administrativa inválida' });
+      const adminSession = adminSessionFor(req);
+      if (!adminSession && !authorized(req, adminKey)) return json(res, 401, { error: 'Sessão administrativa inválida. Entre novamente.' });
+      if (req.method === 'POST' && url.pathname === '/admin/logout') {
+        if (adminSession) await mutate(async () => { const next = adminSessions.filter(x => x !== adminSession.session); await store.save('admin-sessions', next); adminSessions = next; });
+        return json(res, 200, { ok: true });
+      }
+      if (req.method === 'GET' && url.pathname === '/admin/fx') return json(res, 200, await fx.current(fxConfig));
+      if (req.method === 'POST' && url.pathname === '/admin/fx') {
+        let data; try { data = await body(req); } catch { return json(res, 400, { error: 'Corpo inválido.' }); }
+        const invalid = validateFxConfig(data);
+        if (invalid) return json(res, 400, { error: invalid });
+        const next = normalizeFxConfig({ mode: data.mode, manualRate: data.mode === 'manual' ? String(data.manualRate).replace(',', '.') : fxConfig.manualRate });
+        await mutate(async () => { await store.save('fx-config', next); fxConfig = next; });
+        return json(res, 200, await fx.current(fxConfig));
+      }
+      if (req.method === 'GET' && url.pathname === '/admin/me') return json(res, 200, { username: adminSession?.account?.username || null, viaKey: !adminSession });
+      if (req.method === 'POST' && url.pathname === '/admin/password') {
+        if (!adminSession?.account) return json(res, 400, { error: 'Entre com usuário e senha para trocar a senha.' });
+        let data; try { data = await body(req); } catch { return json(res, 400, { error: 'Corpo inválido.' }); }
+        if (!verifyPassword(typeof data?.current === 'string' ? data.current : '', adminSession.account.passwordHash)) return json(res, 400, { error: 'Senha atual incorreta.' });
+        const next = typeof data?.next === 'string' ? data.next : '';
+        if (next.length < 10 || next.length > 200) return json(res, 400, { error: 'A nova senha deve ter de 10 a 200 caracteres.' });
+        if (next.toLowerCase().includes(adminSession.account.username)) return json(res, 400, { error: 'A nova senha não pode conter o nome de usuário.' });
+        let username = adminSession.account.username;
+        if (typeof data?.username === 'string' && data.username.trim()) {
+          username = data.username.trim().toLowerCase();
+          if (!/^[a-z0-9._-]{3,32}$/.test(username)) return json(res, 400, { error: 'Usuário deve ter de 3 a 32 caracteres: letras minúsculas, números, ponto, hífen ou sublinhado.' });
+        }
+        await mutate(async () => {
+          const accountsNext = adminAccounts.map(a => a.id === adminSession.account.id ? { ...a, username, passwordHash: hashPassword(next), passwordChangedAt: new Date().toISOString() } : a);
+          await store.save('admin-accounts', accountsNext); adminAccounts = accountsNext;
+          // Trocar a senha encerra as outras sessões do mesmo admin.
+          const sessionsNext = adminSessions.filter(x => x.accountId !== adminSession.account.id || x === adminSession.session);
+          await store.save('admin-sessions', sessionsNext); adminSessions = sessionsNext;
+        });
+        return json(res, 200, { ok: true, username });
+      }
       if (req.method === 'GET' && url.pathname === '/admin/extension/info') {
         return json(res, 200, {
           version: extensionVersion, file: extensionFile, available: await extensionAvailable(),
@@ -840,6 +982,12 @@ const server = http.createServer(async (req, res) => {
           return json(res, 200, { moved: ids.length, report: buildAdminReferralReport({ records: referrals, keys: clientKeys, now, codes: referralCodes }) });
         }
         return json(res, 404, { error: 'Rota não encontrada' });
+      }
+      // Disponibilidade por modelo: mesma lista e preços do /public/models, com o estado de cada fornecedor.
+      if (req.method === 'GET' && url.pathname === '/admin/model-availability') {
+        const now = Date.now();
+        const data = buildAdminAvailability({ routes, connectionForRoute, connections: credentials.connections.map(safeConnection), records: await usageStore.list(), now, originals: originalPrices, resolve: (provider, model) => resolvePrices(priceHistory, new Date(now).toISOString(), provider, model, null) });
+        return json(res, 200, { object: 'list', updatedAt: new Date(now).toISOString(), windowHours: 24, data });
       }
       if (req.method === 'GET' && url.pathname === '/admin/connections') return json(res, 200, { connections: credentials.connections.map(safeConnection) });
       if (req.method === 'GET' && url.pathname === '/admin/usage') {
@@ -1264,6 +1412,86 @@ const server = http.createServer(async (req, res) => {
       if (outcome.failure && outcome.failure[0] !== 409) return json(res, outcome.failure[0], { error: outcome.failure[1] });
       return json(res, 200, { ok: true, credited: !outcome.failure });
     }
+    // Playground público: lista dos modelos grátis e quantas mensagens restam para este visitante.
+    if (req.method === 'GET' && url.pathname === '/public/playground') {
+      const enabled = new Set(enabledModelIds());
+      return json(res, 200, { models: PLAYGROUND_MODELS.filter(id => enabled.has(id)), freeMessages: PLAYGROUND_FREE_MESSAGES, remaining: Math.max(0, PLAYGROUND_FREE_MESSAGES - playgroundByIp.count(tokenHash(clientIp(req)))) });
+    }
+    // Mensagem anônima: segue pelo mesmo gateway do /v1, com a chave virtual do Playground (sem custo, sem saldo).
+    if (req.method === 'POST' && url.pathname === '/public/playground/chat/completions') {
+      req.anubisPlayground = true;
+      url.pathname = '/v1/chat/completions';
+    }
+    if (url.pathname.startsWith('/account/')) {
+      const ip = tokenHash(clientIp(req));
+      const generic = { ok: true, message: 'Se existir uma conta com esses dados, enviamos um e-mail. Confira também a caixa de spam.' };
+      if (req.method === 'GET' && url.pathname === '/account/me') {
+        const found = accountSession(presentedKey(req) || '');
+        if (!found) return json(res, 401, { error: { message: 'Sessão encerrada. Entre novamente.', type: 'authentication_error' } });
+        return json(res, 200, { account: publicAccount(found.account, clientKeys.find(k => k.id === found.account.keyId) || null) });
+      }
+      if (req.method === 'POST' && url.pathname === '/account/logout') {
+        const hash = tokenHash(presentedKey(req) || '');
+        if (accountSessions.some(s => s.hash === hash)) await mutate(async () => { const next = accountSessions.filter(s => s.hash !== hash); await store.save('account-sessions', next); accountSessions = next; });
+        return json(res, 200, { ok: true });
+      }
+      if (req.method !== 'POST') return json(res, 404, { error: 'Rota não encontrada' });
+      if (!/^application\/json\b/i.test(req.headers['content-type'] || '')) return json(res, 415, { error: 'Use application/json' });
+      let data;
+      try { data = await body(req); } catch { return json(res, 400, { error: 'Corpo inválido.' }); }
+      if (url.pathname === '/account/signup') {
+        if (!authLimits.signup.take(ip)) return json(res, 429, { error: 'Muitos cadastros a partir desta rede. Tente de novo em uma hora.' });
+        const checked = validateSignup(accounts, data);
+        if (checked.error) return json(res, checked.field ? 409 : 400, { error: checked.error, field: checked.field || null });
+        // Chave atual opcional: precisa ser uma chave raiz ativa ainda não vinculada a outra conta.
+        let keyId = null;
+        if (typeof data.existingKey === 'string' && data.existingKey.trim()) {
+          const value = data.existingKey.trim();
+          const key = clientKeys.find(k => k.active && equal(k.hash, digest(value)));
+          if (!key) return json(res, 400, { error: 'Chave atual inválida ou revogada.', field: 'existingKey' });
+          if (key.parentId) return json(res, 400, { error: 'Informe a chave principal da conta, não uma chave criada a partir dela.', field: 'existingKey' });
+          if (accounts.some(a => a.keyId === key.id)) return json(res, 409, { error: 'Esta chave já pertence a outra conta.', field: 'existingKey' });
+          keyId = key.id;
+        }
+        const account = { id: randomUUID(), username: checked.username, email: checked.email, passwordHash: hashPassword(checked.password), emailVerifiedAt: null, createdAt: new Date().toISOString(), keyId };
+        await mutate(async () => { const next = [...accounts, account]; await store.save('accounts', next); accounts = next; });
+        authLimits.email.take(account.email);
+        const sent = await sendAccountEmail(account, 'verify');
+        return json(res, 201, { ok: true, emailSent: sent, linkedKey: !!keyId, message: `Enviamos um link de confirmação para ${account.email}.` });
+      }
+      if (url.pathname === '/account/verify' || url.pathname === '/account/magic-login') {
+        const type = url.pathname === '/account/verify' ? 'verify' : 'magic';
+        const used = consumeEmailToken(accountTokens, data.token, type);
+        if (used.tokens) await mutate(async () => { await store.save('account-tokens', used.tokens); accountTokens = used.tokens; });
+        if (used.error) return json(res, 400, { error: used.error });
+        let account = accounts.find(a => a.id === used.accountId && !a.disabled);
+        if (!account) return json(res, 400, { error: 'Conta não encontrada.' });
+        // Abrir o link mágico também comprova o e-mail.
+        if (!account.emailVerifiedAt) await mutate(async () => { const next = accounts.map(a => a.id === account.id ? { ...a, emailVerifiedAt: new Date().toISOString() } : a); await store.save('accounts', next); accounts = next; });
+        account = await ensureAccountKey(accounts.find(a => a.id === account.id));
+        const session = await openAccountSession(account);
+        return json(res, 200, { ...session, account: publicAccount(account, clientKeys.find(k => k.id === account.keyId) || null) });
+      }
+      if (url.pathname === '/account/login') {
+        if (!authLimits.login.take(ip)) return json(res, 429, { error: 'Muitas tentativas. Aguarde 15 minutos ou peça um link de acesso por e-mail.' });
+        const account = findAccountByLogin(accounts, data.login);
+        // Sem conta, a senha é verificada contra um hash fixo para o tempo de resposta não revelar quem existe.
+        const valid = verifyPassword(typeof data.password === 'string' ? data.password : '', account?.passwordHash || DUMMY_PASSWORD_HASH) && !!account && !account.disabled;
+        if (!valid) return json(res, 401, { error: 'Usuário, e-mail ou senha incorretos.' });
+        if (!account.emailVerifiedAt) return json(res, 403, { error: 'Confirme seu e-mail antes de entrar. Podemos reenviar o link.', type: 'email_not_verified' });
+        const ready = await ensureAccountKey(account);
+        const session = await openAccountSession(ready);
+        return json(res, 200, { ...session, account: publicAccount(ready, clientKeys.find(k => k.id === ready.keyId) || null) });
+      }
+      if (url.pathname === '/account/magic-link' || url.pathname === '/account/resend') {
+        const account = findAccountByLogin(accounts, data.login);
+        if (!authLimits.login.take(ip)) return json(res, 429, { error: 'Muitas tentativas. Aguarde alguns minutos.' });
+        const type = url.pathname === '/account/resend' ? 'verify' : 'magic';
+        if (account && !account.disabled && (type === 'magic' || !account.emailVerifiedAt) && authLimits.email.take(account.email)) await sendAccountEmail(account, type);
+        return json(res, 200, generic);
+      }
+      return json(res, 404, { error: 'Rota não encontrada' });
+    }
     // Revogação da sessão escolhida no painel, feita pelo próprio portador do token (sem chave administrativa).
     if (req.method === 'DELETE' && url.pathname === '/client-session') {
       const token = presentedKey(req);
@@ -1371,7 +1599,7 @@ const server = http.createServer(async (req, res) => {
       return json(res, 200, { object: 'list', updatedAt: new Date(publicCatalogCache.at).toISOString(), data: publicCatalogCache.data });
     }
     if (url.pathname.startsWith('/v1/')) {
-      const clientKey = clientForRequest(req);
+      const clientKey = req.anubisPlayground ? PLAYGROUND_KEY : clientForRequest(req);
       if (!clientKey) return json(res, 401, { error: { message: 'Chave Anubis inválida', type: 'authentication_error' } });
       const clientPlan = plans.find(p => p.id === clientKey.planId) || null;
       if (req.method === 'GET' && url.pathname === '/v1/models') {
@@ -1380,6 +1608,19 @@ const server = http.createServer(async (req, res) => {
       }
       if (req.method !== 'POST' || !['/v1/chat/completions', '/v1/messages', '/v1/responses'].includes(url.pathname)) return json(res, 404, { error: { message: 'Endpoint não implementado' } });
       const input = await body(req, bytes => traffic.noteRequestBytes(bytes));
+      if (req.anubisPlayground) {
+        if (!PLAYGROUND_MODELS.includes(input?.model)) return json(res, 403, { error: { message: 'No Playground sem conta, use um dos modelos grátis.', type: 'permission_error' } });
+        if (!Array.isArray(input.messages) || JSON.stringify(input.messages).length > 24_000) return json(res, 413, { error: { message: 'Conversa longa demais para o Playground sem conta. Entre para continuar.', type: 'login_required' } });
+        const visitor = tokenHash(clientIp(req));
+        if (!playgroundByIp.take(visitor)) return json(res, 401, { error: { message: 'Você usou as mensagens grátis. Entre ou crie uma conta para continuar.', type: 'login_required' }, remaining: 0 });
+        if (!playgroundAll.take('all')) return json(res, 503, { error: { message: 'O Playground grátis atingiu o limite de hoje. Entre para continuar.', type: 'login_required' } });
+        // Falha do gateway ou do fornecedor (5xx) não gasta a mensagem grátis.
+        res.on('finish', () => { if (res.statusCode >= 500) { playgroundByIp.refund(visitor); playgroundAll.refund('all'); } });
+        res.setHeader('x-playground-remaining', String(Math.max(0, PLAYGROUND_FREE_MESSAGES - playgroundByIp.count(visitor))));
+        res.setHeader('access-control-expose-headers', 'x-request-id, x-playground-remaining');
+        input.max_tokens = Math.min(Number.isSafeInteger(input.max_tokens) && input.max_tokens > 0 ? input.max_tokens : 1024, 1024);
+        delete input.tools; delete input.tool_choice;
+      }
       if (clientPlan && !planAllowsModel(clientPlan, input.model)) return json(res, 403, { error: { message: 'Modelo não permitido neste plano', type: 'permission_error' } });
       const records = await usageStore.list();
       const quota = checkPlanQuota(clientPlan, usageInWindow(records, clientKey.id, monthWindow()));

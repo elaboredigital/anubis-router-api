@@ -40,9 +40,15 @@ function marginRows(spend, profit) {
     return {
       currency,
       amount: formatUnits(gain),
-      marginPercent: sale > 0n ? Math.round(Number(gain * 10000n / sale)) / 100 : null,
+      marginPercent: sale > 0n ? Math.round(Number(gain * 1000000n / sale) / 100) / 100 : null,
     };
   });
+}
+/** Custo liquidado = venda liquidada − lucro liquidado, pela mesma razão (não pelo custo estimado na chamada). */
+function settledCost(spend, profit) {
+  const out = new Map();
+  for (const currency of new Set([...spend.keys(), ...profit.keys()])) out.set(currency, (spend.get(currency) || 0n) - (profit.get(currency) || 0n));
+  return out;
 }
 function finish(item) {
   return {
@@ -54,6 +60,7 @@ function finish(item) {
     upstreamModels: [...(item.upstreamModels || [])].sort(),
     routes: item.routes || 0, enabledRoutes: item.enabledRoutes || 0,
     cost: formatTotals(item.cost), spend: formatTotals(item.spend), profit: formatTotals(item.profit),
+    settledCost: formatTotals(settledCost(item.spend, item.profit)),
     margin: marginRows(item.spend, item.profit),
   };
 }

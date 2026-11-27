@@ -161,9 +161,19 @@ export function modelPricing({ routes, connectionForRoute, resolve, originals = 
   });
 }
 
+/** Chamada típica usada para comparar preço por chamada com a tabela por token (mesma conta da home). */
+export const TYPICAL_CALL = Object.freeze({ input: 25000, output: 2500 });
+
 /** Preço original público com o desconto de cada campo em relação à venda. */
 function publicOriginal(original, sale) {
   if (!original || !sale) return null;
+  // Venda por chamada contra tabela por token: o original vira o custo de uma chamada típica na tabela.
+  if (sale.billingType === 'request' && (original.request === undefined || original.request === null || original.request === '') && (original.input || original.output)) {
+    const units = Number(original.input || 0) * TYPICAL_CALL.input / 1e6 + Number(original.output || 0) * TYPICAL_CALL.output / 1e6;
+    original = { ...original, request: String(Number(units.toPrecision(6))) };
+    const result = publicOriginal(original, { ...sale, input: null, output: null });
+    return result ? { ...result, typicalCall: TYPICAL_CALL } : null;
+  }
   const out = { currency: original.currency || 'USD' };
   let any = false;
   for (const field of PRICE_FIELDS) {
@@ -196,4 +206,48 @@ export function buildPublicCatalog({ routes, connectionForRoute, resolve, origin
       ...uptimeFor(records, item.id, now),
     };
   });
+}
+
+/**
+ * Disponibilidade para o admin: a mesma lista e os mesmos preços de buildPublicCatalog (mesma origem do /models),
+ * mais cada fornecedor do modelo com o estado da conexão e as tentativas das últimas 24h.
+ * Uma tentativa é um registro de uso; o desfecho do modelo (uptime) continua contado por requisição.
+ */
+export function buildAdminAvailability({ routes, connectionForRoute, connections = [], resolve, originals = {}, records = [], now = Date.now() }) {
+  const catalog = buildPublicCatalog({ routes, connectionForRoute, resolve, originals, records, now });
+  const suppliersById = new Map(modelPricing({ routes, connectionForRoute, resolve, originals }).map(item => [item.id, item.suppliers]));
+  const start = Math.floor(now / HOUR) * HOUR - (UPTIME_BUCKETS - 1) * HOUR;
+  const attempts = new Map();
+  for (const record of records) {
+    const at = Date.parse(record.startedAt);
+    if (!(at >= start) || at > now || ['cancelled', 'pending'].includes(record.status)) continue;
+    const key = `${record.publicModel}\u0000${record.connectionId}`;
+    const entry = attempts.get(key) || { ok: 0, fail: 0, lastOkAt: null, lastFailure: null };
+    if (record.status === 'completed') {
+      entry.ok++;
+      if (!entry.lastOkAt || record.startedAt > entry.lastOkAt) entry.lastOkAt = record.startedAt;
+    } else {
+      entry.fail++;
+      if (!entry.lastFailure || record.startedAt > entry.lastFailure.at) {
+        entry.lastFailure = { at: record.startedAt, status: record.status, httpStatus: record.httpStatus ?? record.failure?.status ?? null, reason: record.failure?.reason || null };
+      }
+    }
+    attempts.set(key, entry);
+  }
+  const byConnection = new Map(connections.map(c => [c.id, c]));
+  return catalog.map(model => ({
+    ...model,
+    suppliers: (suppliersById.get(model.id) || []).map(supplier => {
+      const connection = byConnection.get(supplier.connectionId) || null;
+      const stats = attempts.get(`${model.id}\u0000${supplier.connectionId}`) || { ok: 0, fail: 0, lastOkAt: null, lastFailure: null };
+      const total = stats.ok + stats.fail;
+      return {
+        connectionId: supplier.connectionId, connectionName: supplier.connectionName, provider: supplier.provider,
+        upstreamModel: supplier.upstreamModel, priority: supplier.priority,
+        connectionStatus: connection?.status || null, checkedAt: connection?.checkedAt || null,
+        attempts: total, failures: stats.fail, successRate: total ? Math.round(stats.ok / total * 10000) / 100 : null,
+        lastOkAt: stats.lastOkAt, lastFailure: stats.lastFailure,
+      };
+    }),
+  }));
 }
