@@ -10,10 +10,18 @@
 //   evaluate(config, data, req, { raw, headers })  { error } para notificação inválida, ou { approve, reason, reference, method }
 import { payssionConfig, payssionCheckout, evaluatePayssionNotify } from './credits.js';
 import { coinbaseConfig, coinbaseCheckout, evaluateCoinbaseNotify } from './coinbase.js';
+import { stripeConfig, stripeCheckout, stripeOrderId, evaluateStripeNotify } from './stripe.js';
 
 const clip = (value, max) => (typeof value === 'string' ? value.slice(0, max) : null);
 
 export const ADAPTERS = Object.freeze({
+  stripe: {
+    id: 'stripe', label: 'Stripe', methods: ['Cartão'],
+    config: env => stripeConfig(env),
+    checkout: (config, request, options) => stripeCheckout(config, request, options),
+    orderId: event => stripeOrderId(event),
+    evaluate: (config, event, request, context) => evaluateStripeNotify(config, event, request, context),
+  },
   coinbase: {
     id: 'coinbase', label: 'Coinbase (cripto)', methods: ['USDC'],
     config: env => coinbaseConfig(env),
