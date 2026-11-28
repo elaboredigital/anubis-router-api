@@ -17,17 +17,15 @@ test('senha usa scrypt com sal e confere só a senha certa', () => {
   assert.equal(verifyPassword('x', 'lixo'), false);
 });
 
-test('cadastro valida usuário, e-mail e senha e recusa duplicados', () => {
+test('cadastro valida e-mail e senha, recusa duplicados e só entra pelo e-mail', () => {
   const accounts = [{ username: 'ana', email: 'ana@x.com' }];
-  assert.deepEqual(validateSignup(accounts, { username: ' Bia.Dev ', email: 'BIA@x.com', password: '12345678' }), { username: 'bia.dev', email: 'bia@x.com', password: '12345678' });
-  assert.match(validateSignup(accounts, { username: 'a', email: 'a@x.com', password: '12345678' }).error, /Usuário/);
-  assert.match(validateSignup(accounts, { username: 'admin', email: 'z@x.com', password: '12345678' }).error, /disponível/);
-  assert.match(validateSignup(accounts, { username: 'zeca', email: 'nao-email', password: '12345678' }).error, /e-mail/);
-  assert.match(validateSignup(accounts, { username: 'zeca', email: 'z@x.com', password: '123' }).error, /senha/);
-  assert.equal(validateSignup(accounts, { username: 'ana', email: 'z@x.com', password: '12345678' }).field, 'username');
-  assert.equal(validateSignup(accounts, { username: 'zeca', email: 'ANA@x.com', password: '12345678' }).field, 'email');
+  assert.deepEqual(validateSignup(accounts, { email: ' BIA@x.com ', password: '12345678' }), { email: 'bia@x.com', password: '12345678' });
+  assert.match(validateSignup(accounts, { email: 'nao-email', password: '12345678' }).error, /e-mail/);
+  assert.match(validateSignup(accounts, { email: 'z@x.com', password: '123' }).error, /senha/);
+  assert.match(validateSignup(accounts, { email: 'zecazeca@x.com', password: 'ZecaZeca' }).error, /igual ao e-mail/);
+  assert.equal(validateSignup(accounts, { email: 'ANA@x.com', password: '12345678' }).field, 'email');
   assert.equal(findAccountByLogin(accounts, 'ANA@X.com'), accounts[0]);
-  assert.equal(findAccountByLogin(accounts, ' Ana '), accounts[0]);
+  assert.equal(findAccountByLogin(accounts, ' ana '), null, 'nome de usuário antigo não serve para entrar');
   assert.equal(findAccountByLogin(accounts, 'ninguem'), null);
 });
 
@@ -57,10 +55,10 @@ test('limite em memória conta eventos na janela', () => {
   assert.equal(limiter.count('ip', 1500), 0, 'refund devolve o último evento');
 });
 
-test('e-mail escapa o nome e leva o link', () => {
-  const mail = buildEmail('verify', { username: '<b>ana</b>', link: 'https://site/confirmar?token=abc' });
+test('e-mail escapa o link e não depende de nome de usuário', () => {
+  const mail = buildEmail('verify', { link: 'https://site/confirmar?token=abc' });
   assert.match(mail.subject, /Confirme/);
-  assert.doesNotMatch(mail.html, /<b>ana<\/b>/);
+  assert.doesNotMatch(mail.html, /Olá, /);
   assert.match(mail.text, /https:\/\/site\/confirmar\?token=abc/);
 });
 
@@ -121,12 +119,12 @@ test('fluxo: Playground anônimo com cota, cadastro, confirmação, login por se
   assert.equal((await response.json()).error.type, 'login_required');
 
   // Cadastro: e-mail com link de confirmação; antes de confirmar não entra.
-  response = await post('/account/signup', { username: 'Ana', email: 'ana@example.com', password: 'senha-da-ana' });
+  response = await post('/account/signup', { email: 'ana@example.com', password: 'senha-da-ana' });
   assert.equal(response.status, 201);
   const verifyLink = await lastLink('verify');
   assert.equal(verifyLink.origin + verifyLink.pathname, 'https://site.example/confirmar');
-  assert.equal((await post('/account/signup', { username: 'ana', email: 'outra@example.com', password: 'senha-da-ana' })).status, 409);
-  response = await post('/account/login', { login: 'ana', password: 'senha-da-ana' });
+  assert.equal((await post('/account/signup', { email: 'ANA@example.com', password: 'outra-senha-1' })).status, 409);
+  response = await post('/account/login', { email: 'ana@example.com', password: 'senha-da-ana' });
   assert.equal(response.status, 403);
   assert.equal((await response.json()).type, 'email_not_verified');
 
@@ -134,7 +132,8 @@ test('fluxo: Playground anônimo com cota, cadastro, confirmação, login por se
   assert.equal(response.status, 200);
   const verified = await response.json();
   assert.match(verified.token, /^anubis_acct_/);
-  assert.equal(verified.account.username, 'ana');
+  assert.equal(verified.account.email, 'ana@example.com');
+  assert.equal('username' in verified.account, false);
   assert.equal(verified.account.emailVerified, true);
   assert.ok(verified.account.keyId, 'conta confirmada ganha chave raiz');
   assert.equal((await post('/account/verify', { token: verifyLink.searchParams.get('token') })).status, 400, 'link de confirmação é de uso único');
@@ -150,18 +149,18 @@ test('fluxo: Playground anônimo com cota, cadastro, confirmação, login por se
 
   // Login por usuário ou e-mail; senha errada não revela se a conta existe.
   assert.equal((await post('/account/login', { login: 'ANA@example.com', password: 'senha-da-ana' })).status, 200);
-  assert.equal((await post('/account/login', { login: 'ana', password: 'errada-123' })).status, 401);
-  assert.equal((await post('/account/login', { login: 'ninguem', password: 'errada-123' })).status, 401);
+  assert.equal((await post('/account/login', { email: 'ana@example.com', password: 'errada-123' })).status, 401);
+  assert.equal((await post('/account/login', { email: 'ninguem@example.com', password: 'errada-123' })).status, 401);
 
   // Link mágico: resposta genérica, link de uso único.
-  response = await post('/account/magic-link', { login: 'ana' });
+  response = await post('/account/magic-link', { email: 'ana@example.com' });
   assert.equal(response.status, 200);
   const magic = await lastLink('magic');
   assert.equal(magic.pathname, '/entrar');
   response = await post('/account/magic-login', { token: magic.searchParams.get('token') });
   assert.equal(response.status, 200);
   assert.equal((await response.json()).account.keyId, verified.account.keyId);
-  assert.equal((await post('/account/magic-link', { login: 'ninguem' })).status, 200);
+  assert.equal((await post('/account/magic-link', { email: 'ninguem@example.com' })).status, 200);
 
   // Sair encerra a sessão.
   assert.equal((await post('/account/logout', {}, session)).status, 200);
@@ -171,11 +170,11 @@ test('fluxo: Playground anônimo com cota, cadastro, confirmação, login por se
   // Cliente atual vincula a chave principal no cadastro e mantém a mesma conta de saldo.
   response = await post('/admin/keys', { name: 'Cliente antigo' }, admin);
   const old = await response.json();
-  assert.equal((await post('/account/signup', { username: 'bia', email: 'bia@example.com', password: 'senha-da-bia', existingKey: 'anubis_errada' })).status, 400);
-  response = await post('/account/signup', { username: 'bia', email: 'bia@example.com', password: 'senha-da-bia', existingKey: old.key });
+  assert.equal((await post('/account/signup', { email: 'bia@example.com', password: 'senha-da-bia', existingKey: 'anubis_errada' })).status, 400);
+  response = await post('/account/signup', { email: 'bia@example.com', password: 'senha-da-bia', existingKey: old.key });
   assert.equal(response.status, 201);
   assert.equal((await response.json()).linkedKey, true);
   response = await post('/account/verify', { token: (await lastLink('verify')).searchParams.get('token') });
   assert.equal((await response.json()).account.keyId, old.id);
-  assert.equal((await post('/account/signup', { username: 'caio', email: 'caio@example.com', password: 'senha-do-caio', existingKey: old.key })).status, 409, 'chave já vinculada');
+  assert.equal((await post('/account/signup', { email: 'caio@example.com', password: 'senha-do-caio', existingKey: old.key })).status, 409, 'chave já vinculada');
 });

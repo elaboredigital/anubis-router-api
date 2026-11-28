@@ -34,7 +34,7 @@ test('painel serve top up PAYG com crédito manual e plano pronto', async t => {
   assert.equal(page.status, 200);
   const html = await page.text();
   assert.match(html, /data-page="topup"/);
-  assert.match(html, /Top up PAYG/);
+  assert.match(html, /<h1>Crédito manual<\/h1>/);
   assert.match(html, /data-nav="topup"/);
   for (const id of ['topup-create-plan', 'topup-plan-message', 'topup-wallets-count', 'topup-credits', 'topup-consumed', 'topup-pending', 'topup-form', 'topup-key', 'topup-amount', 'topup-currency', 'topup-note', 'topup-message', 'topup-wallet-list', 'topup-history']) assert.match(html, new RegExp(`id="${id}"`));
   for (const amount of ['10', '20', '50', '100', '200', '500']) assert.match(html, new RegExp(`data-amount="${amount}"`));

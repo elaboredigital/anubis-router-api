@@ -298,7 +298,7 @@ async function openAccountSession(account) {
 async function ensureAccountKey(account) {
   if (account.keyId && clientKeys.some(k => k.id === account.keyId)) return account;
   const value = `anubis_${randomBytes(32).toString('base64url')}`;
-  const key = { id: randomUUID(), name: account.username, prefix: value.slice(0, 15), hash: digest(value), active: true, createdAt: new Date().toISOString(), planId: CREDIT_PLAN.id };
+  const key = { id: randomUUID(), name: account.email, prefix: value.slice(0, 15), hash: digest(value), active: true, createdAt: new Date().toISOString(), planId: CREDIT_PLAN.id };
   await mutate(async () => {
     const keys = [...clientKeys, key]; await store.save('api-keys', keys); clientKeys = keys;
     referralCodes[key.id] = makeReferralCode(); await store.save('referral-codes', referralCodes);
@@ -310,7 +310,7 @@ async function sendAccountEmail(account, type) {
   const issued = issueEmailToken(accountTokens, { accountId: account.id, type });
   await mutate(async () => { await store.save('account-tokens', issued.tokens); accountTokens = issued.tokens; });
   const link = `${siteUrl}/${type === 'verify' ? 'confirmar' : 'entrar'}?token=${encodeURIComponent(issued.value)}`;
-  try { return (await mailer.send(account.email, type, { username: account.username, link })).sent; }
+  try { return (await mailer.send(account.email, type, { link })).sent; }
   catch (error) { console.log(`E-mail ${type} para a conta ${account.id} falhou: ${error.code || error.message}`); return false; }
 }
 let writeQueue = Promise.resolve();
@@ -1485,7 +1485,7 @@ const server = http.createServer(async (req, res) => {
           if (accounts.some(a => a.keyId === key.id)) return json(res, 409, { error: 'Esta chave já pertence a outra conta.', field: 'existingKey' });
           keyId = key.id;
         }
-        const account = { id: randomUUID(), username: checked.username, email: checked.email, passwordHash: hashPassword(checked.password), emailVerifiedAt: null, createdAt: new Date().toISOString(), keyId };
+        const account = { id: randomUUID(), email: checked.email, passwordHash: hashPassword(checked.password), emailVerifiedAt: null, createdAt: new Date().toISOString(), keyId };
         await mutate(async () => { const next = [...accounts, account]; await store.save('accounts', next); accounts = next; });
         authLimits.email.take(account.email);
         const sent = await sendAccountEmail(account, 'verify');
@@ -1506,17 +1506,17 @@ const server = http.createServer(async (req, res) => {
       }
       if (url.pathname === '/account/login') {
         if (!authLimits.login.take(ip)) return json(res, 429, { error: 'Muitas tentativas. Aguarde 15 minutos ou peça um link de acesso por e-mail.' });
-        const account = findAccountByLogin(accounts, data.login);
+        const account = findAccountByLogin(accounts, data.email ?? data.login);
         // Sem conta, a senha é verificada contra um hash fixo para o tempo de resposta não revelar quem existe.
         const valid = verifyPassword(typeof data.password === 'string' ? data.password : '', account?.passwordHash || DUMMY_PASSWORD_HASH) && !!account && !account.disabled;
-        if (!valid) return json(res, 401, { error: 'Usuário, e-mail ou senha incorretos.' });
+        if (!valid) return json(res, 401, { error: 'E-mail ou senha incorretos.' });
         if (!account.emailVerifiedAt) return json(res, 403, { error: 'Confirme seu e-mail antes de entrar. Podemos reenviar o link.', type: 'email_not_verified' });
         const ready = await ensureAccountKey(account);
         const session = await openAccountSession(ready);
         return json(res, 200, { ...session, account: publicAccount(ready, clientKeys.find(k => k.id === ready.keyId) || null) });
       }
       if (url.pathname === '/account/magic-link' || url.pathname === '/account/resend') {
-        const account = findAccountByLogin(accounts, data.login);
+        const account = findAccountByLogin(accounts, data.email ?? data.login);
         if (!authLimits.login.take(ip)) return json(res, 429, { error: 'Muitas tentativas. Aguarde alguns minutos.' });
         const type = url.pathname === '/account/resend' ? 'verify' : 'magic';
         if (account && !account.disabled && (type === 'magic' || !account.emailVerifiedAt) && authLimits.email.take(account.email)) await sendAccountEmail(account, type);

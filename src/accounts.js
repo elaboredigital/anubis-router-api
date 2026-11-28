@@ -1,4 +1,5 @@
-// Contas de cliente: cadastro com usuário, e-mail e senha, confirmação por e-mail, login por senha ou link mágico.
+// Contas de cliente: o e-mail é o identificador. Cadastro com e-mail e senha, confirmação por e-mail,
+// login por e-mail e senha ou por link mágico enviado ao e-mail.
 // A conta é dona de uma chave raiz (a família de chaves continua sendo o "usuário" de saldo, plano e indicações).
 // Senhas usam scrypt; tokens de e-mail e de sessão são guardados apenas como hash SHA-256.
 import { createHash, randomBytes, scryptSync, timingSafeEqual } from 'node:crypto';
@@ -6,9 +7,7 @@ import { createHash, randomBytes, scryptSync, timingSafeEqual } from 'node:crypt
 export const SESSION_TTL_MS = 30 * 24 * 3600_000;
 export const VERIFY_TTL_MS = 48 * 3600_000;
 export const MAGIC_TTL_MS = 15 * 60_000;
-const USERNAME = /^[a-z0-9](?:[a-z0-9._-]{1,30})[a-z0-9]$/;
 const EMAIL = /^[^\s@<>()"',;]{1,64}@[^\s@<>()"',;]+\.[a-z]{2,24}$/i;
-const RESERVED = new Set(['admin', 'administrador', 'anubis', 'root', 'suporte', 'support', 'api', 'sistema', 'system']);
 
 export const tokenHash = value => createHash('sha256').update(String(value)).digest('hex');
 export const newToken = (prefix = '') => `${prefix}${randomBytes(32).toString('base64url')}`;
@@ -29,25 +28,23 @@ export function verifyPassword(password, stored) {
 
 export const normalizeLogin = value => typeof value === 'string' ? value.trim().toLowerCase().slice(0, 254) : '';
 
-/** Valida o cadastro e devolve os campos normalizados, ou { error }. Não diferencia "usuário existe" de "e-mail existe" para e-mails. */
+/** Valida o cadastro (e-mail e senha) e devolve os campos normalizados, ou { error }. */
 export function validateSignup(accounts, data) {
-  const username = normalizeLogin(data?.username);
   const email = normalizeLogin(data?.email);
   const password = typeof data?.password === 'string' ? data.password : '';
-  if (!USERNAME.test(username)) return { error: 'Usuário deve ter de 3 a 32 caracteres: letras minúsculas, números, ponto, hífen ou sublinhado.' };
-  if (RESERVED.has(username)) return { error: 'Este nome de usuário não está disponível.' };
   if (!EMAIL.test(email)) return { error: 'Informe um e-mail válido.' };
   if (password.length < 8 || password.length > 200) return { error: 'A senha deve ter de 8 a 200 caracteres.' };
-  if (password.toLowerCase() === username || password.toLowerCase() === email) return { error: 'A senha não pode ser igual ao usuário ou ao e-mail.' };
-  if (accounts.some(a => a.username === username)) return { error: 'Este nome de usuário já está em uso.', field: 'username' };
+  const lower = password.toLowerCase();
+  if (lower === email || lower === email.split('@')[0]) return { error: 'A senha não pode ser igual ao e-mail.' };
   if (accounts.some(a => a.email === email)) return { error: 'Já existe uma conta com este e-mail. Entre ou peça um link de acesso.', field: 'email' };
-  return { username, email, password };
+  return { email, password };
 }
 
+/** Acha a conta pelo e-mail. Contas antigas ainda têm "username" salvo, mas ele não serve mais para entrar. */
 export function findAccountByLogin(accounts, login) {
   const value = normalizeLogin(login);
-  if (!value) return null;
-  return accounts.find(a => (value.includes('@') ? a.email === value : a.username === value)) || null;
+  if (!value || !value.includes('@')) return null;
+  return accounts.find(a => a.email === value) || null;
 }
 
 /** Cria um token de uso único (confirmação ou link mágico). Remove tokens vencidos e os anteriores do mesmo tipo. */
@@ -70,7 +67,7 @@ export function consumeEmailToken(tokens, value, type, now = Date.now()) {
 
 export function publicAccount(account, key = null) {
   return {
-    id: account.id, username: account.username, email: account.email, emailVerified: !!account.emailVerifiedAt,
+    id: account.id, email: account.email, emailVerified: !!account.emailVerifiedAt,
     createdAt: account.createdAt, keyId: account.keyId || null, keyPrefix: key?.prefix || null,
   };
 }

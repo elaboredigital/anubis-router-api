@@ -13,17 +13,17 @@ export function smtpConfig(env = process.env) {
   };
 }
 
-export function buildEmail(kind, { username, link }) {
-  const name = escape(username);
+export function buildEmail(kind, { link }) {
+
   const copy = {
     verify: {
       subject: 'Confirme seu cadastro no Anubis Router',
-      intro: `Olá, ${name}. Falta um passo para ativar sua conta: confirme este e-mail.`,
+      intro: `Olá! Falta um passo para ativar sua conta: confirme este e-mail.`,
       action: 'Confirmar e-mail', note: 'O link vale por 48 horas. Se você não criou esta conta, ignore este e-mail.',
     },
     magic: {
       subject: 'Seu link de acesso ao Anubis Router',
-      intro: `Olá, ${name}. Use o botão abaixo para entrar na sua conta.`,
+      intro: `Olá! Use o botão abaixo para entrar na sua conta.`,
       action: 'Entrar na conta', note: 'O link vale por 15 minutos e funciona uma única vez. Se você não pediu, ignore este e-mail.',
     },
   }[kind];
