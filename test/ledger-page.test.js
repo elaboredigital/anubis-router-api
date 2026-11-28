@@ -48,7 +48,7 @@ test('painel serve a página de razão financeira com versões e reconciliação
   assert.equal((await fetch(`${base}/admin/ledger`)).status, 401);
   const report = await (await fetch(`${base}/admin/ledger`, { headers: { authorization: 'Bearer admin-key-1234567890123' } })).json();
   assert.equal(report.history[0].id, 'baseline-default');
-  assert.equal(report.history[0].multiplier, '5');
+  assert.equal(report.history[0].multiplier, '1.8');
   assert.equal(report.history[0].effectiveAt, null);
   assert.deepEqual(report.entries, []);
   assert.deepEqual(report.summary.counts, { completed: 0, entries: 0, unpriced: 0, pendingConversion: 0 });

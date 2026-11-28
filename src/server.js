@@ -14,6 +14,7 @@ import { buildDashboard, buildKeyUsage, decimalUnits } from './dashboard.js';
 import { buildConnectDiagnostic } from './diagnostics.js';
 import { priceSnapshot } from './pricing.js';
 import { DEFAULT_FREE_PLAN, validatePlan, monthWindow, dayWindow, usageInWindow, checkPlanQuota, checkDailyQuota, planAllowsModel, buildKeyBilling } from './plans.js';
+import { profitRule, MIN_MULTIPLIER, MAX_MULTIPLIER } from './profit-rule.js';
 import { resolvePrices, quoteSale, buildLedgerEntry, upsertLedgerEntry, summarizeLedger } from './ledger.js';
 import { normalizeTopup, validateTopup, buildWallets, checkWalletBalance } from './topup.js';
 import { DEFAULT_ROUTING_POLICY, normalizeRoutingPolicy, validateRoutingPolicy, normalizeRoutingFields, validateRoutingFields, orderedCandidates, nextCursor, shouldRetry, resolveTimeout, isCoolingDown, buildRouteAudit } from './routing-policy.js';
@@ -102,7 +103,7 @@ let credentials = await store.load('credentials', {});
 let clientKeys = await store.load('api-keys', []);
 let providerAccounts = await store.load('provider-accounts', []);
 if (!Array.isArray(providerAccounts)) throw new Error('Dados de saldo inválidos');
-let pricingConfig = await store.load('pricing-config', { defaultMultiplier: '5', rules: [] });
+let pricingConfig = await store.load('pricing-config', { defaultMultiplier: '1.8', rules: [] });
 if (!pricingConfig || !Array.isArray(pricingConfig.rules)) throw new Error('Configuração de preços inválida');
 if (pricingConfig.manualPrices === undefined) pricingConfig.manualPrices = [];
 if (!Array.isArray(pricingConfig.manualPrices)) throw new Error('Preços manuais inválidos');
@@ -410,9 +411,11 @@ function saleSnapshotFor(startedAt, provider, model, plan, publicModel = null) {
   const ruleProvider = reference ? connectionForRoute(reference.route)?.provider || provider : provider;
   const ruleModel = reference ? reference.route.upstreamModel : model;
   const resolved = resolvePrices(priceHistory, startedAt || new Date().toISOString(), ruleProvider, ruleModel, plan?.id || null);
+  // Regra de lucro (30% a 80% sobre o custo, sem passar do original), a mesma do catálogo público.
+  const rule = resolved.manualPrice ? null : profitRule(reference?.referenceCost || null, publicModel ? originalPrices[publicModel] || null : null, resolved.multiplier);
   return {
-    multiplier: resolved.multiplier, manualPrice: resolved.manualPrice, versionIds: resolved.versionIds,
-    referenceCost: reference?.referenceCost || null,
+    multiplier: rule ? rule.multiplier : resolved.multiplier, manualPrice: resolved.manualPrice, versionIds: resolved.versionIds,
+    referenceCost: reference?.referenceCost || null, active: rule ? rule.active : true,
   };
 }
 async function recordLedgerCompletion(record) {
@@ -857,7 +860,7 @@ const server = http.createServer(async (req, res) => {
             suppliers: item.suppliers, supplierCount: item.suppliers.length,
             pricedSuppliers: item.referenceCost?.suppliers || 0,
             averageCost: item.referenceCost, multiplier: item.resolved.manualPrice ? null : item.resolved.multiplier || pricingConfig.defaultMultiplier,
-            manual: !!item.resolved.manualPrice, sale: item.sale, original: item.original,
+            manual: !!item.resolved.manualPrice, sale: item.sale, original: item.original, active: item.active, profitPercent: item.profitPercent,
           })),
         });
       }
@@ -891,9 +894,10 @@ const server = http.createServer(async (req, res) => {
       if (req.method === 'POST' && url.pathname === '/admin/pricing') {
         if (!/^application\/json\b/i.test(req.headers['content-type'] || '')) return json(res, 415, { error: 'Use application/json' });
         const data = await body(req);
-        const validMultiplier = value => typeof value === 'string' && /^(?:0|[1-9]\d{0,3})(?:\.\d{1,6})?$/.test(value) && Number(value) > 0;
+        // Lucro de 30% a 80% sobre o custo: multiplicador entre 1,3 e 1,8.
+        const validMultiplier = value => typeof value === 'string' && /^(?:0|[1-9]\d{0,3})(?:\.\d{1,6})?$/.test(value) && Number(value) >= MIN_MULTIPLIER && Number(value) <= MAX_MULTIPLIER;
         if (data.scope === 'default') {
-          if (!validMultiplier(data.multiplier)) return json(res, 400, { error: 'Multiplicador deve ser maior que zero e ter até seis casas decimais.' });
+          if (!validMultiplier(data.multiplier)) return json(res, 400, { error: 'Multiplicador deve ficar entre 1,3 e 1,8 (lucro de 30% a 80%) e ter até seis casas decimais.' });
           await mutate(async () => { const next = { ...pricingConfig, defaultMultiplier: data.multiplier }; await store.save('pricing-config', next); pricingConfig = next; await appendPriceVersion({ scope: 'default', multiplier: data.multiplier }); });
         } else if (data.scope === 'model') {
           if (!connector(data.provider) || typeof data.model !== 'string' || !/^[\w./:-]{1,160}$/.test(data.model) || (data.multiplier !== null && !validMultiplier(data.multiplier))) return json(res, 400, { error: 'Fornecedor, modelo ou multiplicador inválido.' });
@@ -1753,7 +1757,7 @@ const server = http.createServer(async (req, res) => {
       if (!clientKey) return json(res, 401, { error: { message: 'Chave Anubis inválida', type: 'authentication_error' } });
       const clientPlan = plans.find(p => p.id === clientKey.planId) || null;
       if (req.method === 'GET' && url.pathname === '/v1/models') {
-        const visible = clientPlan?.active === false ? [] : enabledModelIds().filter(id => planAllowsModel(clientPlan, id));
+        const visible = clientPlan?.active === false ? [] : enabledModelIds().filter(id => planAllowsModel(clientPlan, id) && saleSnapshotFor(new Date().toISOString(), null, null, clientPlan, id).active);
         return json(res, 200, { object: 'list', data: visible.map(id => ({ id, object: 'model', owned_by: 'anubis' })) });
       }
       if (req.method !== 'POST' || !['/v1/chat/completions', '/v1/messages', '/v1/responses'].includes(url.pathname)) return json(res, 404, { error: { message: 'Endpoint não implementado' } });
@@ -1789,6 +1793,8 @@ const server = http.createServer(async (req, res) => {
       const failureMeta = (stage, reason, status = null, retryable = false) => ({ stage, reason, status, retryable });
       const configured = routes.filter(r => r.enabled && r.id === input.model && connectionForRoute(r));
       if (!configured.length) return json(res, 404, { error: { message: 'Modelo não configurado ou desabilitado' } });
+      // Modelo sem 30% de lucro abaixo do preço original não é ativado (não aparece no catálogo nem atende).
+      if (!saleSnapshotFor(new Date().toISOString(), null, null, clientPlan, input.model).active) return json(res, 404, { error: { message: 'Modelo indisponível no momento' } });
       const balanceKey = `${clientKey.id}\u0000${url.pathname}\u0000${input.model}`;
       const cursor = balanceCursors.get(balanceKey) || 0;
       // Rodízio usa contador por chave/endpoint/modelo; peso continua usando o request ID.

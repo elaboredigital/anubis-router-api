@@ -33,7 +33,7 @@ test('resolvePrices fixa apenas as versões vigentes na data da chamada', () => 
   const removed = [...history, { id: 'vdel', scope: 'manual', provider: 'xkiro', model: 'remote/m', price: null, effectiveAt: '2026-11-20T00:00:00.000Z' }];
   assert.equal(resolvePrices(removed, at, 'xkiro', 'remote/m').manualPrice, null);
   assert.equal(resolvePrices(removed, at, 'xkiro', 'remote/m').versionIds.includes('vdel'), true);
-  assert.deepEqual(resolvePrices([], at, 'xkiro', 'remote/m'), { multiplier: '5', manualPrice: null, versionIds: [] });
+  assert.deepEqual(resolvePrices([], at, 'xkiro', 'remote/m'), { multiplier: '1.8', manualPrice: null, versionIds: [] });
   const withPlan = [...history, { id: 'vp', scope: 'plan', planId: 'plano-1', multiplier: '3', effectiveAt: '2026-11-15T00:00:00.000Z' }];
   assert.deepEqual(resolvePrices(withPlan, at, 'xkiro', 'remote/m', 'plano-1'), { multiplier: '3', manualPrice: { currency: 'USD', basis: 'per_request', request: '0.5' }, versionIds: ['v1', 'vp', 'vm', 'vman'] });
 });

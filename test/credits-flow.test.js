@@ -125,16 +125,16 @@ test('fluxo de créditos: cliente pede recarga, admin aprova, chamada desconta d
   assert.deepEqual(calls, ['remote/down', 'remote/model']);
   await response.text();
 
-  // Venda = média do custo das duas rotas (0,02 e 0,04) × 5 = 0,15 por requisição.
+  // Venda = média do custo das duas rotas (0,02 e 0,04) × 1,8 = 0,054 por requisição.
   let balance = null;
-  for (let i = 0; i < 20 && balance !== '9.85'; i++) {
+  for (let i = 0; i < 20 && balance !== '9.946'; i++) {
     await new Promise(resolve => setTimeout(resolve, 50));
     credits = await (await fetch(`${base}/me/credits`, { headers: client })).json();
     balance = credits.wallet.balance;
   }
-  assert.equal(balance, '9.85');
+  assert.equal(balance, '9.946');
   assert.equal(credits.statement.length, 1);
-  assert.equal(credits.statement[0].amount, '0.15');
+  assert.equal(credits.statement[0].amount, '0.054');
   assert.equal(credits.statement[0].model, 'anubis/teste');
   assert.doesNotMatch(JSON.stringify(credits), /remote\/|xkiro|upstream|cost|margin/);
 
@@ -143,7 +143,7 @@ test('fluxo de créditos: cliente pede recarga, admin aprova, chamada desconta d
   response = await post(`/admin/topup-requests/${second.id}/reject`, { note: 'Pagamento não encontrado' });
   assert.equal(response.status, 200);
   credits = await (await fetch(`${base}/me/credits`, { headers: client })).json();
-  assert.equal(credits.wallet.balance, '9.85');
+  assert.equal(credits.wallet.balance, '9.946');
   assert.equal(credits.requests.find(item => item.id === second.id).reason, 'Pagamento não encontrado');
 
   // Confirmação automática: gateway assina o corpo; valor precisa bater; reenvio não credita de novo.
@@ -164,7 +164,7 @@ test('fluxo de créditos: cliente pede recarga, admin aprova, chamada desconta d
   assert.equal(response.status, 200); assert.equal((await response.json()).duplicate, true);
   assert.equal((await confirm({ requestId: paid.id, amount: '25', currency: 'USD', reference: 'pix-999' })).status, 409);
   credits = await (await fetch(`${base}/me/credits`, { headers: client })).json();
-  assert.equal(credits.wallet.balance, '34.85', 'recarga confirmada entra uma única vez');
+  assert.equal(credits.wallet.balance, '34.946', 'recarga confirmada entra uma única vez');
 
   // Payssion: checkout da página hospedada e notificação assinada (md5 com campos separados por "|").
   const md5 = text => createHash('md5').update(text).digest('hex');
@@ -190,7 +190,7 @@ test('fluxo de créditos: cliente pede recarga, admin aprova, chamada desconta d
   response = await notify('completed'); assert.equal(response.status, 200); assert.equal((await response.json()).credited, true);
   response = await notify('completed'); assert.equal((await response.json()).credited, false, 'reenvio não credita de novo');
   credits = await (await fetch(`${base}/me/credits`, { headers: client })).json();
-  assert.equal(credits.wallet.balance, '84.85');
+  assert.equal(credits.wallet.balance, '84.946');
   assert.equal(credits.checkout.enabled, true);
   assert.equal((await post(`/me/topup-requests/${viaPayssion.id}/checkout`, {}, client)).status, 409, 'pedido pago não gera novo checkout');
 });

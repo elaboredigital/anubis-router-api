@@ -19,7 +19,7 @@ export function resolvePrices(history, at, provider, model, planId = null) {
   const chosen = ['default', 'plan', 'model', 'manual'].map(scope => effectiveVersion(history, scope, provider, model, at, planId)).filter(Boolean);
   const find = scope => chosen.find(version => version.scope === scope);
   return {
-    multiplier: find('plan')?.multiplier || find('model')?.multiplier || find('default')?.multiplier || '5',
+    multiplier: find('plan')?.multiplier || find('model')?.multiplier || find('default')?.multiplier || '1.8',
     manualPrice: find('manual')?.price || null,
     versionIds: chosen.map(version => version.id),
   };

@@ -48,7 +48,7 @@ test('painel serve a página de planos com limites, elegibilidade e preço de ve
 
   assert.equal((await fetch(`${base}/admin/plans`)).status, 401);
   const report = await (await fetch(`${base}/admin/plans`, { headers: { authorization: 'Bearer admin-key-1234567890123' } })).json();
-  assert.equal(report.defaultMultiplier, '5');
+  assert.equal(report.defaultMultiplier, '1.8');
   assert.equal(report.plans[0].name, 'Gratuito');
   assert.equal(report.plans[0].models.length, 0);
   assert.deepEqual(report.providerUsage, []);

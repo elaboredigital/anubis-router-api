@@ -42,8 +42,8 @@ test('catálogo público não expõe custo nem conexão', () => {
   const data = buildPublicCatalog({ routes, connectionForRoute: () => connection, resolve: () => ({ multiplier: '5' }), now });
   assert.deepEqual(data.map(m => m.id), ['claude-opus', 'gpt-5']);
   assert.equal(data[0].family, 'anthropic');
-  assert.equal(data[0].price.input, '5');
-  assert.equal(data[1].price.request, '0.01');
+  assert.equal(data[0].price.input, '1.8', 'multiplicador de 5× vira o teto de 80% de lucro');
+  assert.equal(data[1].price.request, '0.0036');
   assert.equal(data[1].planOnly, true);
   const text = JSON.stringify(data);
   assert.doesNotMatch(text, /up-claude|wusrouter|"1"|connection/);
@@ -55,7 +55,7 @@ test('família deduzida do nome', () => {
   assert.equal(modelFamily('kimi-k3'), 'moonshot');
 });
 
-test('venda usa a média de custo entre os fornecedores × multiplicador', () => {
+test('venda usa a média de custo entre os fornecedores × multiplicador dentro da faixa de lucro', () => {
   const a = { id: 'a', provider: 'p1', models: [{ id: 'm', billingType: 'token', pricing: { currency: 'USD', input: '1', output: '4' } }] };
   const b = { id: 'b', provider: 'p2', models: [{ id: 'm', billingType: 'token', pricing: { currency: 'USD', input: '2', output: '6', cacheRead: '0.2' } }] };
   const c = { id: 'c', provider: 'p3', models: [{ id: 'm', billingType: 'token', pricing: { currency: 'USD', input: '3', output: '8' } }] };
@@ -72,10 +72,10 @@ test('venda usa a média de custo entre os fornecedores × multiplicador', () =>
   assert.equal(item.referenceCost.input, '2');
   assert.equal(item.referenceCost.output, '6');
   assert.equal(item.referenceCost.cacheRead, '0.2', 'campo informado por um só fornecedor usa só esse valor');
-  assert.equal(item.sale.input, '10');
-  assert.equal(item.sale.output, '30');
+  assert.equal(item.sale.input, '3.6');
+  assert.equal(item.sale.output, '10.8');
   const [single] = modelPricing({ routes: three.slice(0, 1), connectionForRoute: r => byConnection[r.connectionId], resolve: () => ({ multiplier: '5' }) });
-  assert.equal(single.sale.input, '5');
+  assert.equal(single.sale.input, '1.8');
 });
 
 test('média ignora fornecedor em outra unidade quando há maioria', () => {
@@ -93,14 +93,17 @@ test('média ignora fornecedor em outra unidade quando há maioria', () => {
 test('catálogo público mostra preço original e desconto sem expor custo', () => {
   const [item] = buildPublicCatalog({ routes: routes.slice(0, 1), connectionForRoute: () => connection, resolve: () => ({ multiplier: '5' }), originals: { 'claude-opus': { currency: 'USD', input: '15', output: '75' } }, now });
   assert.equal(item.originalPrice.input, '15');
-  assert.equal(item.originalPrice.discount.input, 67);
-  assert.equal(item.originalPrice.discount.output, 87);
+  assert.equal(item.originalPrice.discount.input, 88);
+  assert.equal(item.originalPrice.discount.output, 95);
   assert.equal(item.originalPrice.discount.cacheRead, null);
 });
 
-test('preço original sem desconto não sai no catálogo público', () => {
-  const [item] = buildPublicCatalog({ routes: routes.slice(0, 1), connectionForRoute: () => connection, resolve: () => ({ multiplier: '5' }), originals: { 'claude-opus': { currency: 'USD', input: '1', output: '2' } }, now });
-  assert.equal(item.originalPrice, null);
+test('modelo sem 30% de lucro abaixo do original não é ativado', () => {
+  const data = buildPublicCatalog({ routes: routes.slice(0, 1), connectionForRoute: () => connection, resolve: () => ({ multiplier: '5' }), originals: { 'claude-opus': { currency: 'USD', input: '1', output: '2' } }, now });
+  assert.deepEqual(data, [], 'custo igual ao original: lucro 0%');
+  const [capped] = buildPublicCatalog({ routes: routes.slice(0, 1), connectionForRoute: () => connection, resolve: () => ({ multiplier: '5' }), originals: { 'claude-opus': { currency: 'USD', input: '1.5', output: '3' } }, now });
+  assert.equal(capped.price.input, '1.5', 'lucro de 50%: venda limitada ao original');
+  assert.equal(capped.originalPrice, null, 'sem desconto, o original não aparece riscado');
 });
 
 test('disponibilidade do admin repete o catálogo público e soma tentativas por fornecedor', () => {

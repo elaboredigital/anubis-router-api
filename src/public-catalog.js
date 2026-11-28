@@ -1,6 +1,7 @@
 // Catálogo público de modelos para o painel do cliente.
 // Expõe apenas preço de VENDA (multiplicador ou preço manual), nunca custo do fornecedor, conexão ou credencial.
 import { decimalUnits, formatUnits } from './dashboard.js';
+import { profitRule, TYPICAL_CALL } from './profit-rule.js';
 
 const SCALE = 10n ** 12n;
 const HOUR = 3600_000;
@@ -37,7 +38,7 @@ export function salePrice(costSnapshot, resolved) {
     };
   }
   if (!costSnapshot) return null;
-  const multiplierUnits = decimalUnits(String(resolved?.multiplier || '5'));
+  const multiplierUnits = decimalUnits(String(resolved?.multiplier || '1.8'));
   if (multiplierUnits === null) return null;
   const perRequest = costSnapshot.billingType === 'request';
   const price = {
@@ -153,16 +154,19 @@ export function modelPricing({ routes, connectionForRoute, resolve, originals = 
     const { route, connection } = item;
     const providerModel = connection.models?.find(m => m.id === route.upstreamModel) || null;
     const reference = averageCost(item.suppliers.map(s => s.cost));
-    const resolved = resolve(connection.provider, route.upstreamModel) || {};
+    const asked = resolve(connection.provider, route.upstreamModel) || {};
+    const original = originals[item.id] || null;
+    // Lucro de 30% a 80% sobre o custo e nunca acima do original; preço manual é decisão do admin e fica como está.
+    const rule = asked.manualPrice ? null : profitRule(reference, original, asked.multiplier);
+    const resolved = rule ? { ...asked, multiplier: rule.multiplier } : asked;
     return {
       id: item.id, route, providerModel, suppliers: item.suppliers, referenceCost: reference, resolved,
-      sale: salePrice(reference, resolved), original: originals[item.id] || null,
+      sale: salePrice(reference, resolved), original, active: rule ? rule.active : true, profitPercent: rule?.profitPercent ?? null,
     };
   });
 }
 
-/** Chamada típica usada para comparar preço por chamada com a tabela por token (mesma conta da home). */
-export const TYPICAL_CALL = Object.freeze({ input: 25000, output: 2500 });
+export { TYPICAL_CALL };
 
 /** Preço original público com o desconto de cada campo em relação à venda. */
 function publicOriginal(original, sale) {
@@ -193,7 +197,8 @@ function publicOriginal(original, sale) {
  * e preço original do fabricante quando cadastrado. Nunca expõe custo, fornecedor ou conexão.
  */
 export function buildPublicCatalog({ routes, connectionForRoute, resolve, originals = {}, records = [], now = Date.now() }) {
-  return modelPricing({ routes, connectionForRoute, resolve, originals }).map(item => {
+  // Só entra no catálogo o modelo ativo pela regra de lucro (venda com pelo menos 30% sobre o custo, abaixo do original).
+  return modelPricing({ routes, connectionForRoute, resolve, originals }).filter(item => item.active).map(item => {
     const name = item.route.name || item.providerModel?.name || item.id;
     return {
       id: item.id, name,

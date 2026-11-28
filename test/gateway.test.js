@@ -42,9 +42,10 @@ test('gateway isola chaves, encaminha a rota e preserva streaming', async t => {
   assert.equal((await fetch(`${base}/admin/routes`, { headers: { authorization: 'Bearer invalid' } })).status, 401);
   const adminHeaders = { authorization: `Bearer ${adminKey}`, 'content-type': 'application/json' };
   let priceResponse = await fetch(`${base}/admin/pricing`, { headers: adminHeaders });
-  assert.equal((await priceResponse.json()).defaultMultiplier, '5');
-  priceResponse = await fetch(`${base}/admin/pricing`, { method: 'POST', headers: adminHeaders, body: JSON.stringify({ scope: 'model', provider: 'xkiro', model: 'remote/model', multiplier: '2.5' }) });
-  assert.equal((await priceResponse.json()).rules[0].multiplier, '2.5');
+  assert.equal((await priceResponse.json()).defaultMultiplier, '1.8');
+  priceResponse = await fetch(`${base}/admin/pricing`, { method: 'POST', headers: adminHeaders, body: JSON.stringify({ scope: 'model', provider: 'xkiro', model: 'remote/model', multiplier: '1.5' }) });
+  assert.equal((await priceResponse.json()).rules[0].multiplier, '1.5');
+  priceResponse = await fetch(`${base}/admin/pricing`, { method: 'POST', headers: adminHeaders, body: JSON.stringify({ scope: 'default', multiplier: '5' }) }); assert.equal(priceResponse.status, 400, 'lucro acima de 80% é recusado');
   priceResponse = await fetch(`${base}/admin/pricing`, { method: 'POST', headers: adminHeaders, body: JSON.stringify({ scope: 'default', multiplier: '0' }) }); assert.equal(priceResponse.status, 400);
   priceResponse = await fetch(`${base}/admin/pricing`, { method: 'POST', headers: adminHeaders, body: JSON.stringify({ scope: 'model', provider: 'xkiro', model: 'remote/model', multiplier: null }) });
   assert.equal((await priceResponse.json()).rules.length, 0);
@@ -183,7 +184,7 @@ test('gateway isola chaves, encaminha a rota e preserva streaming', async t => {
     await new Promise(resolve => setTimeout(resolve, 10));
   }
   assert.equal(billing.usage.requests, 1); assert.equal(billing.limits.requests, 1);
-  assert.equal(billing.sales.find(item => item.currency === 'USD').sale, '0.1');
+  assert.equal(billing.sales.find(item => item.currency === 'USD').sale, '0.036');
   response = await fetch(`${base}/v1/chat/completions`, { method: 'POST', headers: planHeaders, body: JSON.stringify({ model: 'meu/modelo', messages: [] }) });
   assert.equal(response.status, 429); assert.match(JSON.stringify(await response.json()), /Limite de requisições/);
   response = await fetch(`${base}/admin/plans`, { method: 'POST', headers: adminHeaders, body: JSON.stringify({ id: testPlan.id, ...planData, monthlyRequests: 5, monthlyTokens: 1 }) });
@@ -194,14 +195,14 @@ test('gateway isola chaves, encaminha a rota e preserva streaming', async t => {
   assert.equal(response.status, 200);
   response = await fetch(`${base}/v1/chat/completions`, { method: 'POST', headers: planHeaders, body: JSON.stringify({ model: 'meu/modelo', messages: [] }) });
   assert.equal(response.status, 429); assert.match(JSON.stringify(await response.json()), /inativo/i);
-  response = await fetch(`${base}/admin/plans`, { method: 'POST', headers: adminHeaders, body: JSON.stringify({ id: testPlan.id, ...planData, monthlyRequests: 5, monthlyTokens: 1000, multiplier: '3' }) });
+  response = await fetch(`${base}/admin/plans`, { method: 'POST', headers: adminHeaders, body: JSON.stringify({ id: testPlan.id, ...planData, monthlyRequests: 5, monthlyTokens: 1000, multiplier: '1.6' }) });
   assert.equal(response.status, 200);
   response = await fetch(`${base}/v1/chat/completions`, { method: 'POST', headers: planHeaders, body: JSON.stringify({ model: 'meu/modelo', messages: [] }) });
   assert.equal(response.status, 200); await response.text();
   billing = (await (await fetch(`${base}/admin/keys`, { headers: adminHeaders })).json()).keys.find(item => item.name === 'Chave com plano').billing;
-  // Duas chamadas concluídas a US$ 0,02: a simulação usa o multiplicador vigente do plano (3x), sem versionamento.
-  assert.equal(billing.sales.find(item => item.currency === 'USD').sale, '0.12');
-  assert.equal(billing.sales.find(item => item.currency === 'USD').marginPercent, 66.7);
+  // Duas chamadas concluídas a US$ 0,02: a simulação usa o multiplicador vigente do plano (1,6x), sem versionamento.
+  assert.equal(billing.sales.find(item => item.currency === 'USD').sale, '0.064');
+  assert.equal(billing.sales.find(item => item.currency === 'USD').marginPercent, 37.5);
   const plansReport = await (await fetch(`${base}/admin/plans`, { headers: adminHeaders })).json();
   assert.equal(plansReport.plans.length, 3, 'gratuito, créditos e o plano do teste'); assert.equal(plansReport.providerUsage.length >= 1, true);
   response = await fetch(`${base}/admin/keys/plan`, { method: 'POST', headers: adminHeaders, body: JSON.stringify({ id: planKeyCreated.id, planId: null }) });
@@ -213,27 +214,27 @@ test('gateway isola chaves, encaminha a rota e preserva streaming', async t => {
   assert.equal((await fetch(`${base}/admin/ledger`)).status, 401);
   let ledgerReport = await (await fetch(`${base}/admin/ledger`, { headers: adminHeaders })).json();
   assert.equal(ledgerReport.history[0].scope, 'default');
-  assert.equal(ledgerReport.history[0].multiplier, '5');
+  assert.equal(ledgerReport.history[0].multiplier, '1.8');
   assert.equal(ledgerReport.history[0].effectiveAt, null);
-  const firstEntry = ledgerReport.entries.find(item => item.keyId === planKeyCreated.id && item.multiplier === '5' && item.status === 'settled');
-  assert.equal(firstEntry.cost, '0.02'); assert.equal(firstEntry.sale, '0.1'); assert.equal(firstEntry.marginPercent, 80);
+  const firstEntry = ledgerReport.entries.find(item => item.keyId === planKeyCreated.id && item.multiplier === '1.8' && item.status === 'settled');
+  assert.equal(firstEntry.cost, '0.02'); assert.equal(firstEntry.sale, '0.036'); assert.equal(firstEntry.marginPercent, 44.44);
   assert.equal(firstEntry.planId, testPlan.id); assert.equal(firstEntry.versionIds.includes('baseline-default'), true);
-  const planEntry = ledgerReport.entries.find(item => item.keyId === planKeyCreated.id && item.multiplier === '3');
-  assert.equal(planEntry.sale, '0.06');
+  const planEntry = ledgerReport.entries.find(item => item.keyId === planKeyCreated.id && item.multiplier === '1.6');
+  assert.equal(planEntry.sale, '0.032');
   assert.equal(ledgerReport.summary.counts.pendingConversion, 0);
   assert.equal(ledgerReport.summary.counts.unpriced, 0);
-  response = await fetch(`${base}/admin/pricing`, { method: 'POST', headers: adminHeaders, body: JSON.stringify({ scope: 'default', multiplier: '4' }) });
-  assert.equal(response.status, 200); assert.equal((await response.json()).defaultMultiplier, '4');
+  response = await fetch(`${base}/admin/pricing`, { method: 'POST', headers: adminHeaders, body: JSON.stringify({ scope: 'default', multiplier: '1.4' }) });
+  assert.equal(response.status, 200); assert.equal((await response.json()).defaultMultiplier, '1.4');
   response = await fetch(`${base}/v1/chat/completions`, { method: 'POST', headers: { authorization: `Bearer ${apiKey}`, 'content-type': 'application/json' }, body: JSON.stringify({ model: 'meu/modelo', messages: [] }) });
   assert.equal(response.status, 200); await response.text();
   for (let n = 0; n < 30; n++) {
     ledgerReport = await (await fetch(`${base}/admin/ledger`, { headers: adminHeaders })).json();
-    if (ledgerReport.entries.some(item => item.keyId === created.id && item.multiplier === '4')) break;
+    if (ledgerReport.entries.some(item => item.keyId === created.id && item.multiplier === '1.4')) break;
     await new Promise(resolve => setTimeout(resolve, 10));
   }
-  assert.equal(ledgerReport.history.some(version => version.scope === 'default' && version.multiplier === '4' && version.effectiveAt !== null), true);
-  const versionedEntry = ledgerReport.entries.find(item => item.keyId === created.id && item.multiplier === '4');
-  assert.equal(versionedEntry.sale, '0.08');
+  assert.equal(ledgerReport.history.some(version => version.scope === 'default' && version.multiplier === '1.4' && version.effectiveAt !== null), true);
+  const versionedEntry = ledgerReport.entries.find(item => item.keyId === created.id && item.multiplier === '1.4');
+  assert.equal(versionedEntry.sale, '0.028');
   assert.equal(versionedEntry.versionIds.some(id => id !== 'baseline-default'), true);
   const reconcile = await (await fetch(`${base}/admin/ledger/reconcile`, { method: 'POST', headers: adminHeaders })).json();
   assert.equal(reconcile.added, 0);
@@ -247,15 +248,15 @@ test('gateway isola chaves, encaminha a rota e preserva streaming', async t => {
   const paygCall = () => fetch(`${base}/v1/chat/completions`, { method: 'POST', headers: paygHeaders, body: JSON.stringify({ model: 'meu/modelo', messages: [] }) });
   response = await paygCall(); assert.equal(response.status, 402);
   const blocked = await response.json();
-  assert.equal(blocked.error.type, 'insufficient_balance'); assert.equal(blocked.error.required, '0.08');
+  assert.equal(blocked.error.type, 'insufficient_balance'); assert.equal(blocked.error.required, '0.028');
   assert.equal((await fetch(`${base}/admin/topup`)).status, 401);
   response = await fetch(`${base}/admin/topup`, { method: 'POST', headers: adminHeaders, body: JSON.stringify({ keyId: paygCreated.id, amount: '0.1', currency: 'BRL' }) });
   assert.equal(response.status, 400);
-  const topupBody = JSON.stringify({ keyId: paygCreated.id, amount: '0.1', currency: 'USD', note: 'recarga teste', idempotencyKey: 'topup-idempotente' });
+  const topupBody = JSON.stringify({ keyId: paygCreated.id, amount: '0.04', currency: 'USD', note: 'recarga teste', idempotencyKey: 'topup-idempotente' });
   response = await fetch(`${base}/admin/topup`, { method: 'POST', headers: adminHeaders, body: topupBody });
   assert.equal(response.status, 201);
   const topped = await response.json();
-  assert.equal(topped.duplicate, false); assert.equal(topped.wallet.balance, '0.1');
+  assert.equal(topped.duplicate, false); assert.equal(topped.wallet.balance, '0.04');
   response = await fetch(`${base}/admin/topup`, { method: 'POST', headers: adminHeaders, body: topupBody });
   assert.equal(response.status, 200); assert.equal((await response.json()).duplicate, true);
   // Crédito avulso em qualquer chave ativa, com moeda explícita quando não há plano PAYG.
@@ -275,11 +276,11 @@ test('gateway isola chaves, encaminha a rota e preserva streaming', async t => {
 
   const topupReport = await (await fetch(`${base}/admin/topup`, { headers: adminHeaders })).json();
   assert.equal(topupReport.topups.length, 3); assert.equal(topupReport.topups[0].note, 'recarga teste');
-  assert.equal(topupReport.wallets.find(item => item.keyId === paygCreated.id).balance, '0.1');
+  assert.equal(topupReport.wallets.find(item => item.keyId === paygCreated.id).balance, '0.04');
   assert.equal(topupReport.wallets.find(item => item.keyId === freeKey.id).balance, '7.5');
   assert.equal(topupReport.wallets.find(item => item.keyId === noPlanKey.id).balance, '3');
   const paygKeyReport = await (await fetch(`${base}/admin/keys`, { headers: adminHeaders })).json();
-  assert.equal(paygKeyReport.keys.find(item => item.name === 'Chave PAYG').wallet.balance, '0.1');
+  assert.equal(paygKeyReport.keys.find(item => item.name === 'Chave PAYG').wallet.balance, '0.04');
   assert.equal(paygKeyReport.keys.find(item => item.name === 'Chave com crédito avulso').wallet.balance, '7.5');
   response = await paygCall(); assert.equal(response.status, 200); await response.text();
   let paygWallet;
@@ -288,8 +289,8 @@ test('gateway isola chaves, encaminha a rota e preserva streaming', async t => {
     if (paygWallet.requests >= 1) break;
     await new Promise(resolve => setTimeout(resolve, 10));
   }
-  assert.equal(paygWallet.consumed, '0.08'); assert.equal(paygWallet.balance, '0.02'); assert.equal(paygWallet.requests, 1);
-  response = await paygCall(); assert.equal(response.status, 402); assert.equal((await response.json()).error.balance, '0.02');
+  assert.equal(paygWallet.consumed, '0.028'); assert.equal(paygWallet.balance, '0.012'); assert.equal(paygWallet.requests, 1);
+  response = await paygCall(); assert.equal(response.status, 402); assert.equal((await response.json()).error.balance, '0.012');
   response = await fetch(`${base}/admin/keys/revoke`, { method: 'POST', headers: adminHeaders, body: JSON.stringify({ id: planKeyCreated.id }) });
   assert.equal(response.status, 200);
   response = await fetch(`${base}/admin/keys/revoke`, { method: 'POST', headers: adminHeaders, body: JSON.stringify({ id: created.id }) });

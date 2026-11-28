@@ -104,11 +104,11 @@ export function planAllowsModel(plan, modelId) {
 }
 
 export function planMultiplier(plan, defaultMultiplier) {
-  return plan?.multiplier || defaultMultiplier || '5';
+  return plan?.multiplier || defaultMultiplier || '1.8';
 }
 
 /** Custo apurado nas chamadas concluídas do mês e preço de venda sugerido pelo multiplicador do plano. */
-export function buildKeyBilling(keys, records, plans = [], defaultMultiplier = '5', now = new Date()) {
+export function buildKeyBilling(keys, records, plans = [], defaultMultiplier = '1.8', now = new Date()) {
   const window = monthWindow(now);
   return keys.map(key => {
     const plan = plans.find(item => item.id === key.planId) || null;

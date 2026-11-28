@@ -88,11 +88,11 @@ test('admin persiste homologação e aplica gate opcional sem expor segredos', a
   assert.equal(JSON.stringify(report).includes('apiKey'), false);
 
   assert.equal((await post({ enforceResale: true })).status, 200);
-  const blockedPrice = await fetch(`${base}/admin/pricing`, { method: 'POST', headers: adminHeaders, body: JSON.stringify({ scope: 'model', provider: 'xkiro', model: 'remote/model', multiplier: '2' }) });
+  const blockedPrice = await fetch(`${base}/admin/pricing`, { method: 'POST', headers: adminHeaders, body: JSON.stringify({ scope: 'model', provider: 'xkiro', model: 'remote/model', multiplier: '1.5' }) });
   assert.equal(blockedPrice.status, 403);
   assert.match((await blockedPrice.json()).error, /sem homologação documentada/);
   assert.equal((await post({ enforceResale: false })).status, 200);
-  const allowedPrice = await fetch(`${base}/admin/pricing`, { method: 'POST', headers: adminHeaders, body: JSON.stringify({ scope: 'model', provider: 'xkiro', model: 'remote/model', multiplier: '2' }) });
+  const allowedPrice = await fetch(`${base}/admin/pricing`, { method: 'POST', headers: adminHeaders, body: JSON.stringify({ scope: 'model', provider: 'xkiro', model: 'remote/model', multiplier: '1.5' }) });
   assert.equal(allowedPrice.status, 200);
 
   const page = await (await fetch(`${base}/providers`)).text();
