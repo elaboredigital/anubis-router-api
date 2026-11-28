@@ -306,6 +306,41 @@ async function ensureAccountKey(account) {
   });
   return accounts.find(a => a.id === account.id);
 }
+/** Código de indicação do link (/cadastro?ref=CODIGO) → chave principal ativa do titular. */
+function referralOwnerFor(code, ownKeyId = null) {
+  const wanted = typeof code === 'string' ? code.trim().toUpperCase() : '';
+  if (!/^[0-9A-F]{10}$/.test(wanted)) return null;
+  const ownerKeyId = Object.keys(referralCodes).find(id => referralCodes[id] === wanted);
+  const owner = clientKeys.find(key => key.id === ownerKeyId && !key.parentId && key.active !== false);
+  return owner && owner.id !== ownKeyId ? owner.id : null;
+}
+/** Indicação real: registrada uma única vez, quando a conta indicada confirma o e-mail. */
+async function registerLinkReferral(account) {
+  if (!account?.referredBy || account.referredBy === account.keyId) return;
+  await mutate(async () => {
+    if (referrals.some(item => item.accountId === account.id)) return;
+    if (!clientKeys.some(key => key.id === account.referredBy && !key.parentId && key.active !== false)) return;
+    const now = new Date().toISOString();
+    const item = { ...normalizeReferral({ ownerKeyId: account.referredBy, contact: account.email, createdAt: now, note: 'Cadastro pelo link de indicação' }), id: randomUUID(), ownerKeyId: account.referredBy, accountId: account.id, createdAt: now };
+    referrals = [...referrals, item];
+    await store.save('referrals', referrals);
+    appendReferralAudit({ id: randomUUID(), at: now, actorKeyId: 'system', action: 'register_referral', targetKeyId: item.id, ownerKeyId: item.ownerKeyId, before: null, after: { status: 'cadastro' }, reason: 'link' });
+    await store.save('referral-audit', referralAudit);
+  });
+}
+/** Chamado dentro de mutate: a primeira recarga paga de 10 USD ou mais qualifica a indicação da conta. */
+async function qualifyReferralByTopup(topup) {
+  const account = accounts.find(item => item.keyId === topup.keyId);
+  const target = account && referrals.find(item => item.accountId === account.id && ['cadastro', 'em_analise'].includes(item.status));
+  if (!target) return;
+  const data = { depositAmount: String(topup.amount), currency: topup.currency, reference: `recarga ${topup.requestId || topup.id}`.slice(0, 80) };
+  if (validateQualify(data, target, topup.createdAt)) return;
+  const updated = applyQualify(target, data, referrals, topup.createdAt);
+  referrals = referrals.map(item => item.id === updated.id ? updated : item);
+  await store.save('referrals', referrals);
+  appendReferralAudit({ id: randomUUID(), at: topup.createdAt, actorKeyId: 'system', action: 'qualify_referral', targetKeyId: updated.id, ownerKeyId: updated.ownerKeyId, before: { status: target.status }, after: { status: updated.status, rewardAmount: updated.rewardAmount, rewardCurrency: updated.rewardCurrency, holdUntil: updated.holdUntil }, reason: data.reference });
+  await store.save('referral-audit', referralAudit);
+}
 async function sendAccountEmail(account, type) {
   const issued = issueEmailToken(accountTokens, { accountId: account.id, type });
   await mutate(async () => { await store.save('account-tokens', issued.tokens); accountTokens = issued.tokens; });
@@ -372,6 +407,7 @@ async function decideTopupRequest(id, action, note = '', payment = null) {
         const nextKeys = clientKeys.map(key => (key.id === owner.id || key.parentId === owner.id) && !key.planId ? { ...key, planId: CREDIT_PLAN.id } : key);
         await store.save('api-keys', nextKeys); clientKeys = nextKeys;
       }
+      await qualifyReferralByTopup(topup);
       updated = { ...current, status: 'approved', decidedAt, topupId: topup.id, note: note || null, payment };
     } else {
       updated = { ...current, status: 'rejected', decidedAt, reason: note || 'Pagamento não confirmado.' };
@@ -431,12 +467,6 @@ function appendReferralAudit(event) {
   if (referralAudit.length > 500) referralAudit = referralAudit.slice(-500);
 }
 // O link gerado usa apenas o Host validado da própria requisição; nunca lê variáveis de ambiente.
-function referralBaseUrl(req) {
-  const host = String(req.headers.host || '');
-  const candidate = /^[\w.-]+(?::\d+)?$/.test(host) ? `http://${host}` : '';
-  return candidate && allowedOrigins.has(candidate) ? candidate : `http://127.0.0.1:${port}`;
-}
-
 function equal(a, b) {
   if (typeof a !== 'string' || typeof b !== 'string') return false;
   const x = Buffer.from(a), y = Buffer.from(b);
@@ -1485,7 +1515,8 @@ const server = http.createServer(async (req, res) => {
           if (accounts.some(a => a.keyId === key.id)) return json(res, 409, { error: 'Esta chave já pertence a outra conta.', field: 'existingKey' });
           keyId = key.id;
         }
-        const account = { id: randomUUID(), email: checked.email, passwordHash: hashPassword(checked.password), emailVerifiedAt: null, createdAt: new Date().toISOString(), keyId };
+        const referredBy = referralOwnerFor(data.ref, keyId);
+        const account = { id: randomUUID(), email: checked.email, passwordHash: hashPassword(checked.password), emailVerifiedAt: null, createdAt: new Date().toISOString(), keyId, ...(referredBy ? { referredBy } : {}) };
         await mutate(async () => { const next = [...accounts, account]; await store.save('accounts', next); accounts = next; });
         authLimits.email.take(account.email);
         const sent = await sendAccountEmail(account, 'verify');
@@ -1501,6 +1532,7 @@ const server = http.createServer(async (req, res) => {
         // Abrir o link mágico também comprova o e-mail.
         if (!account.emailVerifiedAt) await mutate(async () => { const next = accounts.map(a => a.id === account.id ? { ...a, emailVerifiedAt: new Date().toISOString() } : a); await store.save('accounts', next); accounts = next; });
         account = await ensureAccountKey(accounts.find(a => a.id === account.id));
+        await registerLinkReferral(account);
         const session = await openAccountSession(account);
         return json(res, 200, { ...session, account: publicAccount(account, clientKeys.find(k => k.id === account.keyId) || null) });
       }
@@ -1589,7 +1621,7 @@ const server = http.createServer(async (req, res) => {
       }
       if (req.method === 'GET' && url.pathname === '/me/referrals') {
         await ensureReferralCodes();
-        return json(res, 200, buildClientReferralReport({ key, records: referrals.filter(item => item.ownerKeyId === root), now, baseUrl: referralBaseUrl(req), codes: referralCodes }));
+        return json(res, 200, buildClientReferralReport({ key, records: referrals.filter(item => item.ownerKeyId === root), now, baseUrl: siteUrl, codes: referralCodes }));
       }
       if (req.method === 'POST' && ['/me/keys', '/me/keys/plan', '/me/keys/revoke'].includes(url.pathname)) {
         if (!/^application\/json\b/i.test(req.headers['content-type'] || '')) return json(res, 415, { error: 'Use application/json' });

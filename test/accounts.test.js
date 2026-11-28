@@ -177,4 +177,38 @@ test('fluxo: Playground anônimo com cota, cadastro, confirmação, login por se
   response = await post('/account/verify', { token: (await lastLink('verify')).searchParams.get('token') });
   assert.equal((await response.json()).account.keyId, old.id);
   assert.equal((await post('/account/signup', { email: 'caio@example.com', password: 'senha-do-caio', existingKey: old.key })).status, 409, 'chave já vinculada');
+
+  // Indicação real: o link público leva ao cadastro; a indicação nasce na confirmação e qualifica com a recarga aprovada.
+  response = await post('/account/login', { email: 'ana@example.com', password: 'senha-da-ana' });
+  const anaSession = { authorization: `Bearer ${(await response.json()).token}`, 'content-type': 'application/json' };
+  const anaReferrals = async () => (await fetch(`${base}/me/referrals`, { headers: anaSession })).json();
+  const refLink = new URL((await anaReferrals()).link);
+  assert.equal(refLink.origin + refLink.pathname, 'https://site.example/cadastro');
+  // Outra rede: o limite de cadastros por IP já foi usado acima.
+  const otherNetwork = { ...jsonHeaders, 'x-forwarded-for': '203.0.113.7' };
+  response = await post('/account/signup', { email: 'dani@example.com', password: 'senha-da-dani', ref: refLink.searchParams.get('ref').toLowerCase() }, otherNetwork);
+  assert.equal(response.status, 201);
+  assert.equal((await anaReferrals()).referrals.length, 0, 'só conta depois de confirmar o e-mail');
+  response = await post('/account/verify', { token: (await lastLink('verify')).searchParams.get('token') });
+  const dani = await response.json();
+  let report = await anaReferrals();
+  assert.equal(report.referrals.length, 1);
+  assert.equal(report.referrals[0].status, 'cadastro');
+  assert.doesNotMatch(JSON.stringify(report), /dani@example\.com/, 'o titular vê só o contato mascarado');
+  assert.equal((await post('/account/verify', { token: 'x' })).status, 400);
+  const daniSession = { authorization: `Bearer ${dani.token}`, 'content-type': 'application/json' };
+  response = await post('/me/topup-requests', { amount: '10' }, daniSession);
+  assert.equal(response.status, 201);
+  const request = (await response.json()).request;
+  assert.equal((await post(`/admin/topup-requests/${request.id}/approve`, {}, admin)).status, 200);
+  report = await anaReferrals();
+  assert.equal(report.referrals[0].status, 'qualificada');
+  assert.equal(report.referrals[0].rewardAmount, '1.00');
+  assert.equal(report.stats.qualified, 1);
+
+  // Código inválido ou da própria chave não cria indicação.
+  response = await post('/account/signup', { email: 'eva@example.com', password: 'senha-da-eva', ref: 'ZZZZZZZZZZ' }, otherNetwork);
+  assert.equal(response.status, 201);
+  await post('/account/verify', { token: (await lastLink('verify')).searchParams.get('token') });
+  assert.equal((await anaReferrals()).referrals.length, 1);
 });

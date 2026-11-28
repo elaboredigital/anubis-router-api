@@ -219,7 +219,7 @@ export function buildClientReferralReport({ key, records = [], now = new Date().
     program: publicProgram(),
     account: { id: key.id, label: key.prefix ? `${key.prefix}••••••••` : '—' },
     code,
-    link: `${String(baseUrl).replace(/\/+$/, '')}/indicacoes${code ? `?ref=${code}` : ''}`,
+    link: `${String(baseUrl).replace(/\/+$/, '')}/cadastro${code ? `?ref=${code}` : ''}`,
     stats: buildReferralStats(records, root, now),
     referrals: records.filter(item => item.ownerKeyId === root)
       .map(item => safeReferral(item, [], false, codes))
