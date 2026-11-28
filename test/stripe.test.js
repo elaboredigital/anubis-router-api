@@ -31,7 +31,13 @@ test('checkout cria sessão em USD com o pedido e chave de idempotência', async
   assert.deepEqual(result, { provider: 'stripe', redirect: 'https://checkout.stripe.com/c/pay/cs_1', checkoutId: 'cs_1' });
   assert.equal(sent.url, 'https://api.stripe.com/v1/checkout/sessions');
   assert.equal(sent.options.headers.authorization, 'Bearer rk_test_abc123');
-  assert.equal(sent.options.headers['idempotency-key'], 'anubis-req-1');
+  const key = sent.options.headers['idempotency-key'];
+  assert.match(key, /^anubis-req-1-[0-9a-f]{16}$/);
+  // Mesmos parâmetros, mesma chave (clique duplo); outra URL de retorno, outra chave (a Stripe recusaria com 400).
+  await stripeCheckout(config, { id: 'req-1', amount: '20', currency: 'USD' }, { returnUrl: 'https://site/minha-conta?pagamento=retorno', fetcher });
+  assert.equal(sent.options.headers['idempotency-key'], key);
+  await stripeCheckout(config, { id: 'req-1', amount: '20', currency: 'USD' }, { returnUrl: 'https://site/es/panel/account?pagamento=retorno', fetcher });
+  assert.notEqual(sent.options.headers['idempotency-key'], key);
   const form = new URLSearchParams(sent.options.body);
   assert.deepEqual([form.get('mode'), form.get('line_items[0][price_data][currency]'), form.get('line_items[0][price_data][unit_amount]'), form.get('metadata[orderId]'), form.get('client_reference_id')], ['payment', 'usd', '2000', 'req-1', 'req-1']);
   await assert.rejects(stripeCheckout(config, { id: 'req-1', amount: '20' }, { fetcher: async () => new Response('{"error":{"code":"api_key_expired"}}', { status: 401 }) }), /HTTP 401, api_key_expired/);
@@ -77,4 +83,27 @@ test('fluxo: webhook assinado da Stripe credita o pedido uma vez só', async t =
   assert.deepEqual(await (await notify()).json(), { ok: true, credited: true });
   assert.equal((await (await notify()).json()).reason, 'ja_creditado');
   assert.equal((await (await fetch(`${base}/me/credits`, { headers: client })).json()).wallet.balance, '20');
+});
+
+test('cobrança em reais: valor convertido no checkout e webhook aceita o valor gravado no pedido', async () => {
+  const brl = stripeConfig({ ...env, STRIPE_CURRENCY: 'brl' });
+  assert.equal(brl.currency, 'brl');
+  assert.equal(stripeConfig(env).currency, 'usd', 'padrão é dólar');
+  let sent = null;
+  const fetcher = async (url, options) => { sent = { url, options }; return new Response(JSON.stringify({ id: 'cs_2', url: 'https://checkout.stripe.com/c/pay/cs_2' }), { status: 200 }); };
+  await stripeCheckout(brl, { id: 'req-2', amount: '1', currency: 'USD' }, { returnUrl: 'https://site/pt-br/panel/account', fetcher, charge: { currency: 'brl', amount: 538 } });
+  const form = new URLSearchParams(sent.options.body);
+  assert.deepEqual([form.get('line_items[0][price_data][currency]'), form.get('line_items[0][price_data][unit_amount]')], ['brl', '538']);
+  const request = { id: 'req-2', amount: '1', currency: 'USD', charges: [{ currency: 'brl', amount: 530 }, { currency: 'brl', amount: 538 }] };
+  const notify = (amount, currency = 'brl') => {
+    const event = { type: 'checkout.session.completed', data: { object: { id: 'cs_2', payment_status: 'paid', currency, amount_total: amount, metadata: { orderId: 'req-2' } } } };
+    const raw = JSON.stringify(event); const t = Math.floor(Date.now() / 1000);
+    const signature = createHmac('sha256', brl.webhookSecret).update(`${t}.${raw}`).digest('hex');
+    return evaluateStripeNotify(brl, event, request, { raw, headers: { 'stripe-signature': `t=${t},v1=${signature}` } });
+  };
+  assert.equal(notify(538).approve, true);
+  assert.equal(notify(530).approve, true, 'checkout anterior do mesmo pedido, com outra cotação, também vale');
+  assert.equal(notify(500).reason, 'valor_divergente');
+  assert.equal(notify(100, 'usd').approve, true, 'em dólar, o valor do pedido continua valendo');
+  assert.equal(notify(538, 'eur').reason, 'moeda_divergente');
 });

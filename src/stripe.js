@@ -1,6 +1,8 @@
 // Stripe Checkout: página de pagamento hospedada (cartão e os meios ligados no painel da Stripe) e webhook assinado.
 // Variáveis: STRIPE_SECRET_KEY (chave restrita rk_... só com "Checkout Sessions: Write") e STRIPE_WEBHOOK_SECRET (whsec_...).
-import { createHmac, timingSafeEqual } from 'node:crypto';
+// STRIPE_CURRENCY=brl cobra em reais (conta Stripe brasileira: cartão nacional e PIX); o saldo continua em dólar,
+// convertido pela cotação do momento do checkout, que fica gravada no pedido para o webhook conferir.
+import { createHash, createHmac, timingSafeEqual } from 'node:crypto';
 
 const TOLERANCE_SECONDS = 5 * 60;
 
@@ -8,7 +10,8 @@ export function stripeConfig(env = process.env) {
   const secretKey = (env.STRIPE_SECRET_KEY || '').trim();
   const webhookSecret = (env.STRIPE_WEBHOOK_SECRET || '').trim();
   if (!/^(rk|sk)_(live|test)_/.test(secretKey) || !webhookSecret.startsWith('whsec_')) return null;
-  return { secretKey, webhookSecret, live: secretKey.includes('_live_') };
+  const currency = String(env.STRIPE_CURRENCY || 'usd').trim().toLowerCase() === 'brl' ? 'brl' : 'usd';
+  return { secretKey, webhookSecret, live: secretKey.includes('_live_'), currency };
 }
 
 /** Valor em centavos de dólar, sem arredondamento por ponto flutuante. */
@@ -18,14 +21,17 @@ export function stripeCents(amount) {
 }
 
 /** Cria a Checkout Session e devolve { redirect } para a página hospedada da Stripe. */
-export async function stripeCheckout(config, request, { returnUrl, fetcher = fetch } = {}) {
+export async function stripeCheckout(config, request, { returnUrl, fetcher = fetch, charge = null } = {}) {
   const cents = stripeCents(request.amount);
+  // Cobrança em outra moeda (BRL): valor já convertido pelo servidor; sem ela, cobra os centavos de dólar do pedido.
+  const currency = charge?.currency || 'usd';
+  const unitAmount = charge?.amount ?? cents;
   const form = new URLSearchParams({
     mode: 'payment',
     'line_items[0][quantity]': '1',
-    'line_items[0][price_data][currency]': 'usd',
-    'line_items[0][price_data][unit_amount]': String(cents),
-    'line_items[0][price_data][product_data][name]': `Crédito Anubis Router (US$ ${(cents / 100).toFixed(2)})`,
+    'line_items[0][price_data][currency]': currency,
+    'line_items[0][price_data][unit_amount]': String(unitAmount),
+    'line_items[0][price_data][product_data][name]': `Anubis Router credit (US$ ${(cents / 100).toFixed(2)})`,
     client_reference_id: request.id,
     'metadata[orderId]': request.id,
     'payment_intent_data[metadata][orderId]': request.id,
@@ -37,8 +43,9 @@ export async function stripeCheckout(config, request, { returnUrl, fetcher = fet
     headers: {
       authorization: `Bearer ${config.secretKey}`,
       'content-type': 'application/x-www-form-urlencoded',
-      // O mesmo pedido de recarga nunca abre duas sessões diferentes.
-      'idempotency-key': `anubis-${request.id}`,
+      // Clique duplo não abre duas sessões. A chave inclui os parâmetros: a Stripe recusa (400) a mesma chave com
+      // parâmetros diferentes, como outra URL de retorno.
+      'idempotency-key': `anubis-${request.id}-${createHash('sha256').update(form.toString()).digest('hex').slice(0, 16)}`,
     },
     body: form.toString(),
     signal: AbortSignal.timeout(15000),
@@ -83,7 +90,10 @@ export function evaluateStripeNotify(config, event, request, { raw = '', headers
   const paidNow = event.type === 'checkout.session.completed' && session.payment_status === 'paid';
   const paidLater = event.type === 'checkout.session.async_payment_succeeded';
   if (!paidNow && !paidLater) return { approve: false, reason: `evento_${event.type || 'vazio'}${session.payment_status ? `_${session.payment_status}` : ''}`, reference };
-  if (String(session.currency).toLowerCase() !== 'usd' || request.currency !== 'USD') return { approve: false, reason: 'moeda_divergente', reference };
-  if (session.amount_total !== stripeCents(request.amount)) return { approve: false, reason: 'valor_divergente', reference };
+  // Vale a cobrança em dólar do pedido ou qualquer checkout em outra moeda aberto para ele (valor gravado no pedido).
+  const currency = String(session.currency).toLowerCase();
+  const charges = [{ currency: 'usd', amount: stripeCents(request.amount) }, ...(Array.isArray(request.charges) ? request.charges : [])];
+  if (request.currency !== 'USD' || !charges.some(item => item.currency === currency)) return { approve: false, reason: 'moeda_divergente', reference };
+  if (!charges.some(item => item.currency === currency && item.amount === session.amount_total)) return { approve: false, reason: 'valor_divergente', reference };
   return { approve: true, reason: null, reference, method: Array.isArray(session.payment_method_types) ? session.payment_method_types.join(',').slice(0, 40) : null };
 }

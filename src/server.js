@@ -30,6 +30,7 @@ import { buildAdminAvailability, buildPublicCatalog, modelPricing } from './publ
 import { SESSION_TTL_MS, tokenHash, newToken, hashPassword, verifyPassword, validateSignup, findAccountByLogin, issueEmailToken, consumeEmailToken, publicAccount, createLimiter } from './accounts.js';
 import { createMailer, MAIL_LANGS } from './mailer.js';
 import { findGateway, publicGateways, parseNotification } from './payments.js';
+import { stripeCents } from './stripe.js';
 import { createFx, normalizeFxConfig, validateFxConfig, DEFAULT_FX_CONFIG } from './fx.js';
 import { CREDIT_PLAN, TOPUP_PRESETS, MIN_TOPUP, MAX_TOPUP, ensureCreditPlan, validateTopupRequest, clientTopupRequest, clientStatement, spendByModel, verifyPaymentSignature, validatePaymentConfirmation } from './credits.js';
 import { makeReferralCode, safeText, normalizeReferral, validateRegister, validateQualify, applyQualify, validateStatus, applyStatus, buildClientReferralReport, buildAdminReferralReport, validateMoveCredit } from './referrals.js';
@@ -1627,7 +1628,25 @@ const server = http.createServer(async (req, res) => {
         if (!request) return json(res, 404, { error: 'Pedido não encontrado.' });
         if (request.status !== 'pending') return json(res, 409, { error: 'Este pedido já foi decidido.' });
         const site = (process.env.ANUBIS_SITE_URL || 'https://anubisrouter.com').replace(/\/+$/, '');
-        try { return json(res, 200, { gateway: gateway.adapter.id, ...(await gateway.adapter.checkout(gateway.config, request, { returnUrl: `${site}/panel/account?pagamento=retorno` })) }); }
+        // A volta do pagamento cai na Minha conta no idioma em que a pessoa está.
+        const lang = accountLang(data?.lang);
+        const returnUrl = `${site}${lang && lang !== 'en' ? `/${lang}` : ''}/panel/account?pagamento=retorno`;
+        // Stripe em reais: converte pela cotação do momento e grava o valor no pedido antes de abrir o pagamento.
+        let charge = null;
+        if (gateway.adapter.id === 'stripe' && gateway.config.currency === 'brl') {
+          const quote = await fx.current(fxConfig);
+          if (!(quote?.rate > 0)) return json(res, 503, { error: 'Não foi possível abrir o pagamento agora. Tente de novo ou use outro meio.' });
+          charge = { currency: 'brl', amount: Math.ceil(stripeCents(request.amount) * quote.rate), rate: quote.rate, at: new Date().toISOString() };
+          await mutate(async () => {
+            const current = topupRequests.find(item => item.id === request.id);
+            if (!current || current.status !== 'pending') return;
+            const charges = [...(Array.isArray(current.charges) ? current.charges : []).filter(item => !(item.currency === charge.currency && item.amount === charge.amount)), charge].slice(-10);
+            const updated = { ...current, charges };
+            await entries.upsert('topup-requests', updated);
+            topupRequests = topupRequests.map(item => item.id === updated.id ? updated : item);
+          });
+        }
+        try { return json(res, 200, { gateway: gateway.adapter.id, ...(await gateway.adapter.checkout(gateway.config, request, { returnUrl, charge })) }); }
         catch (error) { console.error(`${gateway.adapter.label}: checkout falhou`, error.message); return json(res, 502, { error: 'Não foi possível abrir o pagamento agora. Tente de novo ou use outro meio.' }); }
       }
       // Playground da conta: grátis sempre liberados; pagos só com plano mensal ativo ou saldo de crédito positivo.
