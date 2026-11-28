@@ -329,14 +329,30 @@ async function registerLinkReferral(account) {
     await store.save('referral-audit', referralAudit);
   });
 }
-/** Chamado dentro de mutate: a primeira recarga paga de 10 USD ou mais qualifica a indicação da conta. */
+/** Chamado dentro de mutate: lança o bônus da indicação como recarga do titular, uma única vez por indicação. */
+async function creditReferralReward(item, at) {
+  const idempotencyKey = `referral-${item.id}`;
+  if (!item.rewardAmount || topups.some(topup => topup.idempotencyKey === idempotencyKey)) return;
+  const owner = clientKeys.find(key => key.id === item.ownerKeyId);
+  if (!owner || owner.active === false) return;
+  const topup = { id: randomUUID(), keyId: owner.id, amount: item.rewardAmount, currency: item.rewardCurrency || 'USD', note: 'Bônus de indicação', idempotencyKey, planId: owner.planId || null, createdAt: at, referralId: item.id };
+  await entries.upsert('topups', topup); topups = [...topups, topup];
+  // Quem recebe bônus passa a usar o saldo: chaves da conta sem plano entram no plano de créditos.
+  if (clientKeys.some(key => (key.id === owner.id || key.parentId === owner.id) && !key.planId)) {
+    const nextKeys = clientKeys.map(key => (key.id === owner.id || key.parentId === owner.id) && !key.planId ? { ...key, planId: CREDIT_PLAN.id } : key);
+    await store.save('api-keys', nextKeys); clientKeys = nextKeys;
+  }
+}
+/** Chamado dentro de mutate: o primeiro depósito pago de 20 USD ou mais qualifica a indicação e credita o bônus na hora. */
 async function qualifyReferralByTopup(topup) {
   const account = accounts.find(item => item.keyId === topup.keyId);
   const target = account && referrals.find(item => item.accountId === account.id && ['cadastro', 'em_analise'].includes(item.status));
   if (!target) return;
   const data = { depositAmount: String(topup.amount), currency: topup.currency, reference: `recarga ${topup.requestId || topup.id}`.slice(0, 80) };
   if (validateQualify(data, target, topup.createdAt)) return;
-  const updated = applyQualify(target, data, referrals, topup.createdAt);
+  const qualifiedItem = applyQualify(target, data, referrals, topup.createdAt);
+  await creditReferralReward(qualifiedItem, topup.createdAt);
+  const updated = { ...qualifiedItem, status: 'creditado', movedAt: topup.createdAt };
   referrals = referrals.map(item => item.id === updated.id ? updated : item);
   await store.save('referrals', referrals);
   appendReferralAudit({ id: randomUUID(), at: topup.createdAt, actorKeyId: 'system', action: 'qualify_referral', targetKeyId: updated.id, ownerKeyId: updated.ownerKeyId, before: { status: target.status }, after: { status: updated.status, rewardAmount: updated.rewardAmount, rewardCurrency: updated.rewardCurrency, holdUntil: updated.holdUntil }, reason: data.reference });
@@ -1051,6 +1067,7 @@ const server = http.createServer(async (req, res) => {
             const invalidNow = validateMoveCredit(referrals, ids, null, now);
             if (invalidNow) { conflict = true; return; }
             const moved = new Set(ids);
+            for (const item of referrals.filter(entry => moved.has(entry.id))) await creditReferralReward(item, now);
             referrals = referrals.map(item => moved.has(item.id) ? { ...item, status: 'creditado', movedAt: now, reviewedAt: now } : item);
             await store.save('referrals', referrals);
             appendReferralAudit({ id: randomUUID(), at: now, actorKeyId: 'admin', action: 'move_referral_credit', targetKeyId: ids.length === 1 ? ids[0] : null, ownerKeyId: null, before: { status: 'qualificada', ids }, after: { status: 'creditado', ids }, reason: null });
@@ -1677,7 +1694,18 @@ const server = http.createServer(async (req, res) => {
       }
       if (req.method === 'GET' && url.pathname === '/me/referrals') {
         await ensureReferralCodes();
-        return json(res, 200, buildClientReferralReport({ key, records: referrals.filter(item => item.ownerKeyId === root), now, baseUrl: siteUrl, codes: referralCodes }));
+        // Para cada indicado: confirmou o e-mail, quanto depositou e quanto já gastou (sem expor a conta).
+        const mine = referrals.filter(item => item.ownerKeyId === root);
+        const wallets = buildWallets(clientKeys, plans, topups, ledger);
+        const activity = {};
+        for (const item of mine) {
+          const account = item.accountId ? accounts.find(entry => entry.id === item.accountId) : null;
+          const keyId = account?.keyId || null;
+          const deposited = keyId ? topups.filter(topup => topup.keyId === keyId && topup.requestId).reduce((sum, topup) => sum + Number(topup.amount || 0), 0) : 0;
+          const wallet = keyId ? wallets.find(entry => entry.keyId === keyId) : null;
+          activity[item.id] = { verified: !!account?.emailVerifiedAt, deposited: deposited.toFixed(2), spent: Number(wallet?.consumed || 0).toFixed(2) };
+        }
+        return json(res, 200, buildClientReferralReport({ key, records: mine, now, baseUrl: siteUrl, codes: referralCodes, activity }));
       }
       if (req.method === 'POST' && ['/me/keys', '/me/keys/plan', '/me/keys/revoke'].includes(url.pathname)) {
         if (!/^application\/json\b/i.test(req.headers['content-type'] || '')) return json(res, 415, { error: 'Use application/json' });

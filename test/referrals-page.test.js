@@ -90,20 +90,20 @@ test('indicações ficam no mesmo painel, com acompanhamento no admin e isolamen
     saved.push((await next.json()).referral);
   }
   for (let i = 0; i < saved.length; i += 1) {
-    const qualified = await post('/admin/referrals/qualify', adminKey, { id: saved[i].id, depositAmount: '10.00', qualifiedAt: oldDates[i] });
+    const qualified = await post('/admin/referrals/qualify', adminKey, { id: saved[i].id, depositAmount: '20.00', qualifiedAt: oldDates[i] });
     const payload = await qualified.json();
     assert.equal(qualified.status, 200, `${i}: ${JSON.stringify(payload)}`);
     const item = payload.referral;
-    assert.equal(item.rewardAmount, i < 2 ? '1.00' : '1.50');
+    assert.equal(item.rewardAmount, '5.00');
     assert.match(item.holdUntil, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
   }
-  assert.equal((await post('/admin/referrals/qualify', adminKey, { id: saved[0].id, depositAmount: '9.00' })).status, 400);
-  assert.equal((await post('/admin/referrals/qualify', adminKey, { id: saved[0].id, depositAmount: '10.00', currency: 'EUR' })).status, 400);
+  assert.equal((await post('/admin/referrals/qualify', adminKey, { id: saved[0].id, depositAmount: '19.00' })).status, 400);
+  assert.equal((await post('/admin/referrals/qualify', adminKey, { id: saved[0].id, depositAmount: '20.00', currency: 'EUR' })).status, 400);
   assert.equal((await post('/admin/referrals/status', adminKey, { id: saved[0].id, status: 'rejeitada' })).status, 400);
 
   report = await (await request('/admin/referrals', { headers: adminHeaders })).json();
   assert.equal(report.totals.qualified, 4);
-  assert.equal(report.totals.available.amount, '5.00');
+  assert.equal(report.totals.available.amount, '20.00');
   assert.equal(report.totals.canMove, true);
   assert.equal(report.totals.movableIds.length, 4);
   const moved = await post('/admin/referrals/move-credit', adminKey, { ids: report.totals.movableIds });
@@ -115,7 +115,7 @@ test('indicações ficam no mesmo painel, com acompanhamento no admin e isolamen
   assert.match(clientReport.link, new RegExp(`/signup\\?ref=${codeA}$`));
   assert.equal(clientReport.code.includes('hash'), false);
   assert.equal(clientReport.referrals.length, 4);
-  assert.equal(clientReport.stats.earned.amount, '5.00');
+  assert.equal(clientReport.stats.earned.amount, '20.00');
   assert.equal(clientReport.stats.signups, 4);
   const clientText = JSON.stringify(clientReport);
   assert.equal(clientText.includes(contact), false);

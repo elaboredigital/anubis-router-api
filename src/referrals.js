@@ -1,22 +1,18 @@
-// Programa de indicações local: regras transcritas como exemplo, sem pagamento, saque,
-// crédito real, conversão de moeda ou vínculo com o programa de qualquer fornecedor.
-// Nenhum depósito é cobrado aqui: o administrador apenas registra o que foi informado.
+// Programa de indicações (28/11/2026): quem se cadastra pelo link e faz o primeiro depósito de US$ 20 ou mais
+// rende US$ 5 de crédito real no saldo de quem indicou, lançado na hora como recarga ("Bônus de indicação").
+// Sem saque nem conversão de moeda: o bônus só vale como crédito de uso.
 import { randomBytes } from 'node:crypto';
 import { decimalUnits, formatUnits } from './dashboard.js';
 
 export const REFERRAL_PROGRAM = Object.freeze({
   currency: 'USD',
-  qualifyAmount: '10.00',
-  holdDays: 14,
+  qualifyAmount: '20.00',
+  holdDays: 0,
   minCredit: '5.00',
   ladder: Object.freeze([
-    Object.freeze({ from: 1, to: 2, amount: '1.00' }),
-    Object.freeze({ from: 3, to: 5, amount: '1.50' }),
-    Object.freeze({ from: 6, to: 10, amount: '2.00' }),
-    Object.freeze({ from: 11, to: 25, amount: '2.50' }),
-    Object.freeze({ from: 26, to: null, amount: '3.00' }),
+    Object.freeze({ from: 1, to: null, amount: '5.00' }),
   ]),
-  note: 'Regras locais de exemplo. Depósito qualificado e crédito movido são apenas registro administrativo: nenhum dinheiro é recebido, debitado, reservado, liquidado ou pago.',
+  note: 'Quando alguém se cadastra pelo seu link e faz o primeiro depósito de US$ 20 ou mais, você ganha US$ 5 de crédito no saldo.',
 });
 
 const clean = (value, max = 160) => typeof value === 'string' ? value.trim().slice(0, max) : '';
@@ -211,7 +207,7 @@ export function safeReferral(item, keys = [], forAdmin = false, codes = {}) {
   return result;
 }
 
-export function buildClientReferralReport({ key, records = [], now = new Date().toISOString(), baseUrl = '', codes = {} } = {}) {
+export function buildClientReferralReport({ key, records = [], now = new Date().toISOString(), baseUrl = '', codes = {}, activity = {} } = {}) {
   if (!key) return null;
   const root = key.parentId || key.id;
   const code = codeFor(root, codes);
@@ -222,7 +218,7 @@ export function buildClientReferralReport({ key, records = [], now = new Date().
     link: `${String(baseUrl).replace(/\/+$/, '')}/signup${code ? `?ref=${code}` : ''}`,
     stats: buildReferralStats(records, root, now),
     referrals: records.filter(item => item.ownerKeyId === root)
-      .map(item => safeReferral(item, [], false, codes))
+      .map(item => ({ ...safeReferral(item, [], false, codes), ...(activity[item.id] || {}) }))
       .sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || ''))),
   };
 }

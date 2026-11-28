@@ -22,16 +22,16 @@ function qualified(id, qualifiedAt, amount, status = 'qualificada') {
   };
 }
 
-test('programa local é explícito sobre simulação e não converte moeda', () => {
+test('programa: primeiro depósito de 20 USD rende 5 USD de crédito, sem espera e sem conversão de moeda', () => {
   const program = publicProgram();
   assert.equal(program.currency, 'USD');
-  assert.equal(program.qualifyAmount, '10.00');
-  assert.equal(program.holdDays, 14);
+  assert.equal(program.qualifyAmount, '20.00');
+  assert.equal(program.holdDays, 0);
   assert.equal(program.minCredit, '5.00');
-  assert.match(program.note, /nenhum dinheiro é recebido, debitado, reservado, liquidado ou pago/i);
-  assert.deepEqual(program.ladder.map(item => item.amount), ['1.00', '1.50', '2.00', '2.50', '3.00']);
+  assert.match(program.note, /US\$ 20 ou mais, você ganha US\$ 5/);
+  assert.deepEqual(program.ladder.map(item => item.amount), ['5.00']);
   assert.equal(rewardForPosition(0), null);
-  assert.equal(rewardForPosition(26), '3.00');
+  assert.equal(rewardForPosition(26), '5.00');
   assert.equal(REFERRAL_PROGRAM.currency, 'USD');
 });
 
@@ -59,19 +59,19 @@ test('qualificação usa escada, espera UTC e valida depósito informado', () =>
   assert.match(validateRegister({ ownerKeyId: 'root-a', contact: '   ' }, ['root-a']), /contato/);
   assert.equal(validateRegister({ ownerKeyId: 'root-a', contact: 'p@exemplo.com' }, ['root-a']), null);
 
-  assert.match(validateQualify({ depositAmount: '9.99' }, base, NOW), /10\.00/);
-  assert.match(validateQualify({ depositAmount: '10', currency: 'EUR' }, base, NOW), /USD/);
-  assert.match(validateQualify({ depositAmount: '10' }, { ...base, status: 'creditado' }, NOW), /disponível/);
-  assert.equal(validateQualify({ depositAmount: '10' }, base, NOW), null);
+  assert.match(validateQualify({ depositAmount: '19.99' }, base, NOW), /20\.00/);
+  assert.match(validateQualify({ depositAmount: '20', currency: 'EUR' }, base, NOW), /USD/);
+  assert.match(validateQualify({ depositAmount: '20' }, { ...base, status: 'creditado' }, NOW), /disponível/);
+  assert.equal(validateQualify({ depositAmount: '20' }, base, NOW), null);
 
-  const first = applyQualify(base, { depositAmount: '10.00', reference: 'depósito informado', qualifiedAt: '2020-01-01T00:00:00.000Z' }, [], NOW);
+  const first = applyQualify(base, { depositAmount: '20.00', reference: 'depósito informado', qualifiedAt: '2020-01-01T00:00:00.000Z' }, [], NOW);
   assert.equal(first.status, 'qualificada');
-  assert.equal(first.depositAmount, '10');
-  assert.equal(first.rewardAmount, '1.00');
-  assert.equal(first.holdUntil, '2020-01-15T00:00:00.000Z');
-  const second = applyQualify({ ...base, id: 'r2' }, { depositAmount: '12.5' }, [first], '2020-02-01T00:00:00.000Z');
-  assert.equal(second.rewardAmount, '1.00');
-  assert.equal(second.depositAmount, '12.5');
+  assert.equal(first.depositAmount, '20');
+  assert.equal(first.rewardAmount, '5.00');
+  assert.equal(first.holdUntil, '2020-01-01T00:00:00.000Z', 'sem espera');
+  const second = applyQualify({ ...base, id: 'r2' }, { depositAmount: '25' }, [first], '2020-02-01T00:00:00.000Z');
+  assert.equal(second.rewardAmount, '5.00');
+  assert.equal(second.depositAmount, '25');
 });
 
 test('espera, mínimo e isolamento definem o que pode ser movido', () => {
@@ -79,21 +79,21 @@ test('espera, mínimo e isolamento definem o que pode ser movido', () => {
   const before = buildReferralStats(records, 'root-a', '2020-02-01T00:00:00.000Z');
   assert.equal(before.signups, 4);
   assert.equal(before.qualified, 4);
-  assert.equal(before.pending.amount, '4.00');
-  assert.equal(before.blocked.amount, '1.00');
-  assert.deepEqual(before.movableIds, []);
+  assert.equal(before.pending.amount, '15.00');
+  assert.equal(before.available.amount, '5.00');
+  assert.deepEqual(before.movableIds, ['r1']);
 
   const after = buildReferralStats(records, 'root-a', NOW);
-  assert.equal(after.eligible.amount, '5.00');
-  assert.equal(after.available.amount, '5.00');
+  assert.equal(after.eligible.amount, '20.00');
+  assert.equal(after.available.amount, '20.00');
   assert.equal(after.canMove, true);
   assert.equal(after.movableIds.length, 4);
   assert.equal(after.nextPosition, 5);
-  assert.equal(after.nextReward, '1.50');
+  assert.equal(after.nextReward, '5.00');
   assert.equal(buildReferralStats(records, 'root-b', NOW).signups, 0);
 
   assert.match(validateMoveCredit(records, [], 'root-a', NOW), /Selecione/);
-  assert.match(validateMoveCredit(records, ['r1'], 'root-a', NOW), /5\.00/);
+  assert.equal(validateMoveCredit(records, ['r1'], 'root-a', NOW), null, 'uma indicação já atinge o mínimo de 5 USD');
   assert.equal(validateMoveCredit(records, ['r1', 'r2', 'r3', 'r4'], 'root-a', NOW), null);
   assert.match(validateMoveCredit(records, ['r1', 'r2', 'r3', 'r4'], 'root-b', NOW), /titular/);
   assert.match(validateMoveCredit(records, ['r1', 'r2', 'r3', 'r4'], 'root-a', '2020-02-01T00:00:00.000Z'), /espera/);
@@ -118,7 +118,7 @@ test('relatórios expõem somente dados do titular e nunca chave, hash ou contat
   assert.match(client.link, /^http:\/\/127\.0\.0\.1:3210\/signup\?ref=ABCDEF1234$/);
   assert.equal(client.referrals.length, 6);
   assert.equal(client.stats.earned.amount, '0.00');
-  assert.equal(client.stats.available.amount, '6.50');
+  assert.equal(client.stats.available.amount, '25.00', 'r6 ainda está na espera do dado de teste');
   assert.equal(JSON.stringify(client).includes('pessoa@exemplo.com'), false);
   assert.equal(JSON.stringify(client).includes('root-b'), false);
 

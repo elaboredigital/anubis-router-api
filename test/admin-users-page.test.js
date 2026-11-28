@@ -77,7 +77,7 @@ test('painel /users reúne titulares, saldo, chaves e indicações sem expor seg
   const referral = await api('/admin/referrals', { ownerKeyId: first.id, contact: 'ana@exemplo.com', note: 'cadastro local' });
   assert.equal(referral.status, 201);
   const referralId = (await referral.json()).referral.id;
-  const qualified = await api('/admin/referrals/qualify', { id: referralId, depositAmount: '10.00', qualifiedAt: '2020-01-01T00:00:00.000Z' });
+  const qualified = await api('/admin/referrals/qualify', { id: referralId, depositAmount: '20.00', qualifiedAt: '2020-01-01T00:00:00.000Z' });
   assert.equal(qualified.status, 200);
 
   report = await (await request('/admin/users', { headers: adminHeaders })).json();
