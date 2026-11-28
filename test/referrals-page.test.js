@@ -112,7 +112,7 @@ test('indicações ficam no mesmo painel, com acompanhamento no admin e isolamen
 
   const clientReport = await (await request('/me/referrals', { headers: clientHeaders(keyA) })).json();
   assert.equal(clientReport.code, codeA);
-  assert.match(clientReport.link, new RegExp(`/cadastro\\?ref=${codeA}$`));
+  assert.match(clientReport.link, new RegExp(`/signup\\?ref=${codeA}$`));
   assert.equal(clientReport.code.includes('hash'), false);
   assert.equal(clientReport.referrals.length, 4);
   assert.equal(clientReport.stats.earned.amount, '5.00');

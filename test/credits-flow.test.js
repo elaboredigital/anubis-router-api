@@ -177,7 +177,7 @@ test('fluxo de créditos: cliente pede recarga, admin aprova, chamada desconta d
   assert.equal(checkout.fields.amount, '50.00');
   assert.equal(checkout.fields.order_id, viaPayssion.id);
   assert.equal(checkout.fields.api_sig, md5(['pk_teste', '50.00', 'USD', viaPayssion.id, 'sk_teste'].join('|')));
-  assert.equal(checkout.fields.return_url, 'https://site.example/minha-conta?pagamento=retorno');
+  assert.equal(checkout.fields.return_url, 'https://site.example/panel/account?pagamento=retorno');
   assert.doesNotMatch(JSON.stringify(checkout), /sk_teste/);
   const notify = (state, amount = '50.00', sig) => {
     const data = { app_name: 'anubis', pm_id: 'pix_br', transaction_id: 'T123', order_id: viaPayssion.id, amount, paid: amount, currency: 'USD', state };

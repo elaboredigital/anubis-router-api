@@ -122,7 +122,7 @@ test('fluxo: Playground anônimo com cota, cadastro, confirmação, login por se
   response = await post('/account/signup', { email: 'ana@example.com', password: 'senha-da-ana' });
   assert.equal(response.status, 201);
   const verifyLink = await lastLink('verify');
-  assert.equal(verifyLink.origin + verifyLink.pathname, 'https://site.example/confirmar');
+  assert.equal(verifyLink.origin + verifyLink.pathname, 'https://site.example/confirm');
   assert.equal((await post('/account/signup', { email: 'ANA@example.com', password: 'outra-senha-1' })).status, 409);
   response = await post('/account/login', { email: 'ana@example.com', password: 'senha-da-ana' });
   assert.equal(response.status, 403);
@@ -156,7 +156,7 @@ test('fluxo: Playground anônimo com cota, cadastro, confirmação, login por se
   response = await post('/account/magic-link', { email: 'ana@example.com' });
   assert.equal(response.status, 200);
   const magic = await lastLink('magic');
-  assert.equal(magic.pathname, '/entrar');
+  assert.equal(magic.pathname, '/login');
   response = await post('/account/magic-login', { token: magic.searchParams.get('token') });
   assert.equal(response.status, 200);
   assert.equal((await response.json()).account.keyId, verified.account.keyId);
@@ -183,7 +183,7 @@ test('fluxo: Playground anônimo com cota, cadastro, confirmação, login por se
   const anaSession = { authorization: `Bearer ${(await response.json()).token}`, 'content-type': 'application/json' };
   const anaReferrals = async () => (await fetch(`${base}/me/referrals`, { headers: anaSession })).json();
   const refLink = new URL((await anaReferrals()).link);
-  assert.equal(refLink.origin + refLink.pathname, 'https://site.example/cadastro');
+  assert.equal(refLink.origin + refLink.pathname, 'https://site.example/signup');
   // Outra rede: o limite de cadastros por IP já foi usado acima.
   const otherNetwork = { ...jsonHeaders, 'x-forwarded-for': '203.0.113.7' };
   response = await post('/account/signup', { email: 'dani@example.com', password: 'senha-da-dani', ref: refLink.searchParams.get('ref').toLowerCase() }, otherNetwork);
@@ -197,6 +197,17 @@ test('fluxo: Playground anônimo com cota, cadastro, confirmação, login por se
   assert.doesNotMatch(JSON.stringify(report), /dani@example\.com/, 'o titular vê só o contato mascarado');
   assert.equal((await post('/account/verify', { token: 'x' })).status, 400);
   const daniSession = { authorization: `Bearer ${dani.token}`, 'content-type': 'application/json' };
+  // Playground da conta: sem saldo nem plano mensal, só os grátis ficam liberados.
+  const playgroundOf = async headers => (await fetch(`${base}/me/playground`, { headers })).json();
+  let playground = await playgroundOf(daniSession);
+  const byId = list => Object.fromEntries(list.models.map(model => [model.id, model]));
+  assert.equal(byId(playground)['anubis/free'].free, true);
+  assert.equal(byId(playground)['anubis/free'].available, true);
+  assert.equal(byId(playground)['anubis/paid'].free, false);
+  assert.equal(byId(playground)['anubis/paid'].available, false, 'pago bloqueado sem saldo');
+  assert.equal(playground.access.credit, false);
+  assert.equal(playground.models[0].free, true, 'grátis primeiro');
+  assert.equal((await fetch(`${base}/me/playground`)).status, 401, 'Playground da conta exige sessão');
   response = await post('/me/topup-requests', { amount: '10' }, daniSession);
   assert.equal(response.status, 201);
   const request = (await response.json()).request;
@@ -205,6 +216,9 @@ test('fluxo: Playground anônimo com cota, cadastro, confirmação, login por se
   assert.equal(report.referrals[0].status, 'qualificada');
   assert.equal(report.referrals[0].rewardAmount, '1.00');
   assert.equal(report.stats.qualified, 1);
+  playground = await playgroundOf(daniSession);
+  assert.equal(playground.access.credit, true);
+  assert.equal(byId(playground)['anubis/paid'].available, true, 'com saldo, o pago libera');
 
   // Código inválido ou da própria chave não cria indicação.
   response = await post('/account/signup', { email: 'eva@example.com', password: 'senha-da-eva', ref: 'ZZZZZZZZZZ' }, otherNetwork);

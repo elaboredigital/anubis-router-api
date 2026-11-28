@@ -115,7 +115,7 @@ test('relatórios expõem somente dados do titular e nunca chave, hash ou contat
   const records = ['r1', 'r2', 'r3', 'r4', 'r5', 'r6'].map((id, index) => qualified(id, `2020-0${index + 1}-01T00:00:00.000Z`, '10.00'));
   const client = buildClientReferralReport({ key: keys[0], records, now: NOW, baseUrl: 'http://127.0.0.1:3210/', codes });
   assert.equal(client.code, 'ABCDEF1234');
-  assert.match(client.link, /^http:\/\/127\.0\.0\.1:3210\/cadastro\?ref=ABCDEF1234$/);
+  assert.match(client.link, /^http:\/\/127\.0\.0\.1:3210\/signup\?ref=ABCDEF1234$/);
   assert.equal(client.referrals.length, 6);
   assert.equal(client.stats.earned.amount, '0.00');
   assert.equal(client.stats.available.amount, '6.50');

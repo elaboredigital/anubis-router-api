@@ -306,7 +306,7 @@ async function ensureAccountKey(account) {
   });
   return accounts.find(a => a.id === account.id);
 }
-/** Código de indicação do link (/cadastro?ref=CODIGO) → chave principal ativa do titular. */
+/** Código de indicação do link (/signup?ref=CODIGO) → chave principal ativa do titular. */
 function referralOwnerFor(code, ownKeyId = null) {
   const wanted = typeof code === 'string' ? code.trim().toUpperCase() : '';
   if (!/^[0-9A-F]{10}$/.test(wanted)) return null;
@@ -341,10 +341,25 @@ async function qualifyReferralByTopup(topup) {
   appendReferralAudit({ id: randomUUID(), at: topup.createdAt, actorKeyId: 'system', action: 'qualify_referral', targetKeyId: updated.id, ownerKeyId: updated.ownerKeyId, before: { status: target.status }, after: { status: updated.status, rewardAmount: updated.rewardAmount, rewardCurrency: updated.rewardCurrency, holdUntil: updated.holdUntil }, reason: data.reference });
   await store.save('referral-audit', referralAudit);
 }
+/** Catálogo público com cache de 1 minuto (o mesmo do /models). */
+async function publicCatalog() {
+  const now = Date.now();
+  if (!publicCatalogCache || now - publicCatalogCache.at > 60_000) {
+    const records = await usageStore.list();
+    const data = buildPublicCatalog({ routes, connectionForRoute, records, now, originals: originalPrices, resolve: (provider, model) => resolvePrices(priceHistory, new Date(now).toISOString(), provider, model, null) });
+    publicCatalogCache = { at: now, data };
+  }
+  return publicCatalogCache;
+}
+/** Modelo grátis: tem preço publicado e todo valor publicado é zero. Sem preço (null em tudo) não é grátis. */
+function isFreeModel(entry) {
+  const values = [entry?.price?.input, entry?.price?.output, entry?.price?.request].filter(value => value !== null && value !== undefined);
+  return values.length > 0 && values.every(value => Number(value) === 0);
+}
 async function sendAccountEmail(account, type) {
   const issued = issueEmailToken(accountTokens, { accountId: account.id, type });
   await mutate(async () => { await store.save('account-tokens', issued.tokens); accountTokens = issued.tokens; });
-  const link = `${siteUrl}/${type === 'verify' ? 'confirmar' : 'entrar'}?token=${encodeURIComponent(issued.value)}`;
+  const link = `${siteUrl}/${type === 'verify' ? 'confirm' : 'login'}?token=${encodeURIComponent(issued.value)}`;
   try { return (await mailer.send(account.email, type, { link })).sent; }
   catch (error) { console.log(`E-mail ${type} para a conta ${account.id} falhou: ${error.code || error.message}`); return false; }
 }
@@ -1609,8 +1624,27 @@ const server = http.createServer(async (req, res) => {
         if (!request) return json(res, 404, { error: 'Pedido não encontrado.' });
         if (request.status !== 'pending') return json(res, 409, { error: 'Este pedido já foi decidido.' });
         const site = (process.env.ANUBIS_SITE_URL || 'https://anubisrouter.com').replace(/\/+$/, '');
-        try { return json(res, 200, { gateway: gateway.adapter.id, ...(await gateway.adapter.checkout(gateway.config, request, { returnUrl: `${site}/minha-conta?pagamento=retorno` })) }); }
+        try { return json(res, 200, { gateway: gateway.adapter.id, ...(await gateway.adapter.checkout(gateway.config, request, { returnUrl: `${site}/panel/account?pagamento=retorno` })) }); }
         catch (error) { console.error(`${gateway.adapter.label}: checkout falhou`, error.message); return json(res, 502, { error: 'Não foi possível abrir o pagamento agora. Tente de novo ou use outro meio.' }); }
+      }
+      // Playground da conta: grátis sempre liberados; pagos só com plano mensal ativo ou saldo de crédito positivo.
+      if (req.method === 'GET' && url.pathname === '/me/playground') {
+        const plan = plans.find(p => p.id === key.planId) || null;
+        const wallet = buildWallets(family(), plans, topups, ledger).find(item => item.keyId === root) || null;
+        const monthly = !!plan && plan.kind === 'paid' && plan.active !== false;
+        const credit = !!wallet && Number(wallet.balance) > 0;
+        const enabled = new Set(enabledModelIds());
+        const models = (await publicCatalog()).data
+          .filter(entry => enabled.has(entry.id) && plan?.active !== false && planAllowsModel(plan, entry.id))
+          .map(entry => {
+            const free = isFreeModel(entry);
+            return { id: entry.id, name: entry.name || entry.id, family: entry.family || null, context: entry.context || null, free, available: free || monthly || credit, price: free ? null : entry.price };
+          })
+          .sort((a, b) => Number(b.free) - Number(a.free) || a.name.localeCompare(b.name));
+        return json(res, 200, {
+          access: { plan: plan ? { id: plan.id, name: plan.name, kind: plan.kind } : null, monthly, credit, balance: wallet?.balance ?? null, currency: wallet?.currency || 'USD' },
+          models,
+        });
       }
       if (req.method === 'GET' && url.pathname === '/me/stats') {
         const period = periodFrom(url);
@@ -1626,11 +1660,14 @@ const server = http.createServer(async (req, res) => {
       if (req.method === 'POST' && ['/me/keys', '/me/keys/plan', '/me/keys/revoke'].includes(url.pathname)) {
         if (!/^application\/json\b/i.test(req.headers['content-type'] || '')) return json(res, 415, { error: 'Use application/json' });
         const data = await body(req);
+        // O plano é da conta (assinatura mensal ou créditos): o cliente não troca, e a chave nova herda o da principal.
+        if (url.pathname === '/me/keys/plan') return json(res, 403, { error: 'O plano da conta muda pela assinatura mensal ou pela recarga de créditos, não por chave.' });
         if (url.pathname === '/me/keys') {
-          const invalid = validateCreateKey(data, family(), plans, key);
+          const { planId: _ignored, ...request } = data || {};
+          const invalid = validateCreateKey(request, family(), plans, key);
           if (invalid) return json(res, 400, { error: invalid });
           const value = `anubis_${randomBytes(32).toString('base64url')}`;
-          const planId = data.planId || key.planId || null;
+          const planId = clientKeys.find(item => item.id === root)?.planId || key.planId || null;
           const item = { id: randomUUID(), name: String(data.name).trim().slice(0, 80), prefix: value.slice(0, 15), hash: digest(value), active: true, createdAt: now, planId, parentId: root };
           await mutate(async () => {
             const next = [...clientKeys, item]; await store.save('api-keys', next); clientKeys = next;
@@ -1658,13 +1695,8 @@ const server = http.createServer(async (req, res) => {
     }
     // Catálogo público do painel do cliente: preço de venda e disponibilidade, sem custo, conexão ou credencial.
     if (req.method === 'GET' && url.pathname === '/public/models') {
-      const now = Date.now();
-      if (!publicCatalogCache || now - publicCatalogCache.at > 60_000) {
-        const records = await usageStore.list();
-        const data = buildPublicCatalog({ routes, connectionForRoute, records, now, originals: originalPrices, resolve: (provider, model) => resolvePrices(priceHistory, new Date(now).toISOString(), provider, model, null) });
-        publicCatalogCache = { at: now, data };
-      }
-      return json(res, 200, { object: 'list', updatedAt: new Date(publicCatalogCache.at).toISOString(), data: publicCatalogCache.data });
+      const catalog = await publicCatalog();
+      return json(res, 200, { object: 'list', updatedAt: new Date(catalog.at).toISOString(), data: catalog.data });
     }
     if (url.pathname.startsWith('/v1/')) {
       const clientKey = req.anubisPlayground ? PLAYGROUND_KEY : clientForRequest(req);

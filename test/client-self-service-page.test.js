@@ -78,15 +78,17 @@ test('área do cliente cria e administra chaves derivadas sem acesso administrat
   const otherKey = (await other.json()).key;
   const otherReport = await (await jsonRequest('/me/summary', otherKey)).json();
   assert.equal(otherReport.keys.length, 1);
-  assert.equal((await jsonRequest('/me/keys/plan', otherKey, 'POST', { id: derivedResult.id, planId: 'free' })).status, 400);
+  assert.equal((await jsonRequest('/me/keys/plan', otherKey, 'POST', { id: derivedResult.id, planId: 'free' })).status, 403);
   assert.equal((await jsonRequest('/me/keys/revoke', otherKey, 'POST', { id: derivedResult.id })).status, 400);
   assert.equal((await jsonRequest('/me/keys/revoke', rootKey, 'POST', { id: rootId })).status, 400);
 
   const plan = await request('/admin/plans', { method: 'POST', headers: adminHeaders, body: JSON.stringify({ name: 'Cliente local', kind: 'free', monthlyRequests: 50, monthlyTokens: 1000, models: [], active: true, selfService: true }) });
   assert.equal(plan.status, 201);
   const planId = (await plan.json()).plan.id;
-  assert.equal((await jsonRequest('/me/keys/plan', rootKey, 'POST', { id: derivedResult.id, planId })).status, 200);
-  assert.equal((await jsonRequest('/me/keys/plan', rootKey, 'POST', { id: derivedResult.id, planId: null })).status, 400);
+  // O cliente não troca o plano: ele vem da assinatura mensal ou dos créditos da conta.
+  assert.equal((await jsonRequest('/me/keys/plan', rootKey, 'POST', { id: derivedResult.id, planId })).status, 403);
+  const keysNow = (await (await jsonRequest('/me/summary', rootKey)).json()).keys;
+  assert.equal(keysNow.find(item => item.id === derivedResult.id).planId, keysNow.find(item => item.id === rootId).planId, 'chave nova herda o plano da principal');
 
   const stats = await jsonRequest('/me/stats?from=2026-11-01T00:00:00.000Z&to=2026-11-25T00:00:00.000Z', rootKey);
   assert.equal(stats.status, 200);
