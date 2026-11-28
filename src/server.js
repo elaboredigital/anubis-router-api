@@ -28,7 +28,7 @@ import { buildReadiness, normalizeReadinessUpdate, validateReadinessUpdate, comm
 import { MAXROUTER_PRICING_PAGE, MAXROUTER_PRICING_URL, parseMaxRouterPrices } from './maxrouter-pricing.js';
 import { buildAdminAvailability, buildPublicCatalog, modelPricing } from './public-catalog.js';
 import { SESSION_TTL_MS, tokenHash, newToken, hashPassword, verifyPassword, validateSignup, findAccountByLogin, issueEmailToken, consumeEmailToken, publicAccount, createLimiter } from './accounts.js';
-import { createMailer } from './mailer.js';
+import { createMailer, MAIL_LANGS } from './mailer.js';
 import { findGateway, publicGateways, parseNotification } from './payments.js';
 import { createFx, normalizeFxConfig, validateFxConfig, DEFAULT_FX_CONFIG } from './fx.js';
 import { CREDIT_PLAN, TOPUP_PRESETS, MIN_TOPUP, MAX_TOPUP, ensureCreditPlan, validateTopupRequest, clientTopupRequest, clientStatement, spendByModel, verifyPaymentSignature, validatePaymentConfirmation } from './credits.js';
@@ -356,11 +356,14 @@ function isFreeModel(entry) {
   const values = [entry?.price?.input, entry?.price?.output, entry?.price?.request].filter(value => value !== null && value !== undefined);
   return values.length > 0 && values.every(value => Number(value) === 0);
 }
-async function sendAccountEmail(account, type) {
+// Idioma do site: inglês na raiz, os outros com prefixo. O e-mail e o link seguem o idioma da conta ou do pedido.
+const accountLang = value => MAIL_LANGS.includes(String(value || '').toLowerCase()) ? String(value).toLowerCase() : null;
+async function sendAccountEmail(account, type, requestLang = null) {
+  const lang = accountLang(requestLang) || account.lang || 'en';
   const issued = issueEmailToken(accountTokens, { accountId: account.id, type });
   await mutate(async () => { await store.save('account-tokens', issued.tokens); accountTokens = issued.tokens; });
-  const link = `${siteUrl}/${type === 'verify' ? 'confirm' : 'login'}?token=${encodeURIComponent(issued.value)}`;
-  try { return (await mailer.send(account.email, type, { link })).sent; }
+  const link = `${siteUrl}${lang === 'en' ? '' : `/${lang}`}/${type === 'verify' ? 'confirm' : 'login'}?token=${encodeURIComponent(issued.value)}`;
+  try { return (await mailer.send(account.email, type, { link, lang })).sent; }
   catch (error) { console.log(`E-mail ${type} para a conta ${account.id} falhou: ${error.code || error.message}`); return false; }
 }
 let writeQueue = Promise.resolve();
@@ -1531,7 +1534,7 @@ const server = http.createServer(async (req, res) => {
           keyId = key.id;
         }
         const referredBy = referralOwnerFor(data.ref, keyId);
-        const account = { id: randomUUID(), email: checked.email, passwordHash: hashPassword(checked.password), emailVerifiedAt: null, createdAt: new Date().toISOString(), keyId, ...(referredBy ? { referredBy } : {}) };
+        const account = { id: randomUUID(), email: checked.email, passwordHash: hashPassword(checked.password), emailVerifiedAt: null, createdAt: new Date().toISOString(), keyId, lang: accountLang(data.lang) || 'en', ...(referredBy ? { referredBy } : {}) };
         await mutate(async () => { const next = [...accounts, account]; await store.save('accounts', next); accounts = next; });
         authLimits.email.take(account.email);
         const sent = await sendAccountEmail(account, 'verify');
@@ -1566,7 +1569,7 @@ const server = http.createServer(async (req, res) => {
         const account = findAccountByLogin(accounts, data.email ?? data.login);
         if (!authLimits.login.take(ip)) return json(res, 429, { error: 'Muitas tentativas. Aguarde alguns minutos.' });
         const type = url.pathname === '/account/resend' ? 'verify' : 'magic';
-        if (account && !account.disabled && (type === 'magic' || !account.emailVerifiedAt) && authLimits.email.take(account.email)) await sendAccountEmail(account, type);
+        if (account && !account.disabled && (type === 'magic' || !account.emailVerifiedAt) && authLimits.email.take(account.email)) await sendAccountEmail(account, type, data.lang);
         return json(res, 200, generic);
       }
       return json(res, 404, { error: 'Rota não encontrada' });

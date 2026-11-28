@@ -55,11 +55,19 @@ test('limite em memória conta eventos na janela', () => {
   assert.equal(limiter.count('ip', 1500), 0, 'refund devolve o último evento');
 });
 
+test('e-mail de conta sai no idioma da conta, com direção certa no hebraico', () => {
+  assert.match(buildEmail('verify', { link: 'https://site/es/confirm?token=x', lang: 'es' }).subject, /Confirma tu cuenta/);
+  assert.match(buildEmail('magic', { link: 'https://site/login?token=x' }).subject, /sign-in link/, 'sem idioma, vai em inglês');
+  const he = buildEmail('verify', { link: 'https://site/he/confirm?token=x', lang: 'he' });
+  assert.match(he.html, /<html lang="he" dir="rtl">/);
+  assert.match(buildEmail('verify', { link: 'https://site/x', lang: 'xx' }).html, /<html lang="en" dir="ltr">/, 'idioma desconhecido cai no inglês');
+});
+
 test('e-mail escapa o link e não depende de nome de usuário', () => {
-  const mail = buildEmail('verify', { link: 'https://site/confirmar?token=abc' });
+  const mail = buildEmail('verify', { link: 'https://site/pt-br/confirm?token=abc', lang: 'pt-br' });
   assert.match(mail.subject, /Confirme/);
   assert.doesNotMatch(mail.html, /Olá, /);
-  assert.match(mail.text, /https:\/\/site\/confirmar\?token=abc/);
+  assert.match(mail.text, /https:\/\/site\/pt-br\/confirm\?token=abc/);
 });
 
 test('fluxo: Playground anônimo com cota, cadastro, confirmação, login por senha e por link, chave vinculada', async t => {
@@ -221,8 +229,10 @@ test('fluxo: Playground anônimo com cota, cadastro, confirmação, login por se
   assert.equal(byId(playground)['anubis/paid'].available, true, 'com saldo, o pago libera');
 
   // Código inválido ou da própria chave não cria indicação.
-  response = await post('/account/signup', { email: 'eva@example.com', password: 'senha-da-eva', ref: 'ZZZZZZZZZZ' }, otherNetwork);
+  response = await post('/account/signup', { email: 'eva@example.com', password: 'senha-da-eva', ref: 'ZZZZZZZZZZ', lang: 'es' }, otherNetwork);
   assert.equal(response.status, 201);
-  await post('/account/verify', { token: (await lastLink('verify')).searchParams.get('token') });
+  const evaLink = await lastLink('verify');
+  assert.equal(evaLink.pathname, '/es/confirm', 'o link de confirmação leva à versão do idioma escolhido no cadastro');
+  await post('/account/verify', { token: evaLink.searchParams.get('token') });
   assert.equal((await anaReferrals()).referrals.length, 1);
 });
