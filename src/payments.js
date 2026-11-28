@@ -55,7 +55,11 @@ export function activeGateways(env = process.env, adapters = ADAPTERS) {
 }
 export const findGateway = (id, env = process.env, adapters = ADAPTERS) => activeGateways(env, adapters).find(item => item.adapter.id === id) || null;
 /** O que o cliente vê: sem credenciais, só nome e meios de pagamento. */
-export const publicGateways = (env = process.env, adapters = ADAPTERS) => activeGateways(env, adapters).map(({ adapter }) => ({ id: adapter.id, label: adapter.label, methods: adapter.methods }));
+// Stripe em reais (conta brasileira) também aceita PIX, e a cobrança sai em BRL pela cotação do dia.
+export const publicGateways = (env = process.env, adapters = ADAPTERS) => activeGateways(env, adapters).map(({ adapter, config }) => {
+  const brl = adapter.id === 'stripe' && config?.currency === 'brl';
+  return { id: adapter.id, label: adapter.label, methods: brl ? ['Cartão', 'PIX'] : adapter.methods, chargeCurrency: brl ? 'BRL' : 'USD' };
+});
 
 /** Corpo da notificação em JSON ou formulário. */
 export function parseNotification(raw, contentType = '') {
